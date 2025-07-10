@@ -1,9 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const { GoogleAuth } = require("google-auth-library");
-const path = require("path");
 require("dotenv").config();
-const uploadImageToStorage = require("./upload"); // <-- CORRECT
+const uploadImageToStorage = require("./upload"); // <-- This is your image upload helper
+
+// Use Render.com secret file ABSOLUTE PATH
+const saKeyPath = "/etc/secrets/mogibaai-storage-key.json";
 
 router.post("/google-imagen", async (req, res) => {
   const { prompt, size = "1024x1024", userId = "public" } = req.body;
@@ -27,7 +29,7 @@ router.post("/google-imagen", async (req, res) => {
 
   try {
     const auth = new GoogleAuth({
-      keyFilename: path.join(__dirname, process.env.GOOGLE_APPLICATION_CREDENTIALS),
+      keyFilename: saKeyPath, // ALWAYS use absolute path for Render.com secrets
       scopes: "https://www.googleapis.com/auth/cloud-platform",
     });
 
@@ -45,8 +47,7 @@ router.post("/google-imagen", async (req, res) => {
 
     const response = await client.request({ url, method: "POST", data: body });
 
-    // === SAFE CHECK START ===
-    // Debug: Log full response for your debugging
+    // Debug log for troubleshooting
     console.log("Google Imagen response:", response.data);
 
     if (
@@ -58,7 +59,6 @@ router.post("/google-imagen", async (req, res) => {
       console.error("❌ Google Imagen error: No predictions found", response.data);
       return res.status(500).json({ error: "Image generation failed (no predictions found)", details: response.data });
     }
-    // === SAFE CHECK END ===
 
     const imageBase64 = response.data.predictions[0].bytesBase64Encoded;
     const buffer = Buffer.from(imageBase64, "base64");

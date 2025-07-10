@@ -1,7 +1,6 @@
 const express = require("express");
 const router = express.Router();
 const { GoogleAuth } = require("google-auth-library");
-const path = require("path");
 require("dotenv").config();
 const uploadImageToStorage = require("./upload"); // <-- Already correct
 
@@ -26,8 +25,10 @@ router.post("/google-imagen-fast", async (req, res) => {
   }
 
   try {
+    // === USE SECRET FILE ABSOLUTE PATH ===
+    const saKeyPath = "/etc/secrets/mogibaai-storage-key.json"; // CHANGE HERE!
     const auth = new GoogleAuth({
-      keyFilename: path.join(__dirname, process.env.GOOGLE_APPLICATION_CREDENTIALS),
+      keyFilename: saKeyPath,
       scopes: "https://www.googleapis.com/auth/cloud-platform",
     });
 

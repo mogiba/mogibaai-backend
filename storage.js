@@ -2,16 +2,25 @@
 
 const { Storage } = require('@google-cloud/storage');
 const path = require('path');
+const fs = require('fs');
 
-// Mee .env lo GOOGLE_STORAGE_KEY_ path pettaru kada
-const keyPath = process.env.GOOGLE_STORAGE_KEY_ || './mogibaai-storage-key.json'; // fallback
+// Secret File path - Render.com Secret File version
+const keyPath = '/etc/secrets/mogibaai-storage-key.json';
+
+// File exists check
+if (!fs.existsSync(keyPath)) {
+  throw new Error("Google Storage key file not found at " + keyPath);
+}
+
+// Read project_id from secret file
+const { project_id } = JSON.parse(fs.readFileSync(keyPath, 'utf-8'));
 
 const storage = new Storage({
-  keyFilename: path.resolve(keyPath),
-  projectId: JSON.parse(require('fs').readFileSync(keyPath)).project_id
+  keyFilename: keyPath,
+  projectId: project_id
 });
 
-// Bucket name .json file lo undhi lekapote mee bucket name direct ga ivvachu
+// Bucket name (should match with your GCS bucket name)
 const BUCKET_NAME = 'mogibaai-user-images';
 
 const bucket = storage.bucket(BUCKET_NAME);
