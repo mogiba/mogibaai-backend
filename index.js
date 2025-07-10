@@ -13,6 +13,9 @@ if (!fs.existsSync(saKeyPath)) {
   throw new Error("Google Service Account key file (sa-key.json) not found at /etc/secrets/sa-key.json. Please upload in Render.com Secret Files.");
 }
 
+// OPTIONAL: Export for downstream imports (if any Google libs use require(...))
+process.env.GOOGLE_APPLICATION_CREDENTIALS = saKeyPath;
+
 const app = express();
 
 // --- Middlewares ---
