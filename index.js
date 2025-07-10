@@ -1,8 +1,8 @@
-// server.js
+// index.js (Express backend main entry)
 
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config(); // .env nunchi variables load cheyyadam ki
+require("dotenv").config(); // Load .env variables
 
 const app = express();
 
@@ -14,15 +14,25 @@ app.use(cors());
 const vertexImagenRoute = require("./vertex-image-endpoint");
 const razorpayRoute = require("./razorpay");
 const vertexImagen4FastRoute = require("./vertex-imagen4fast-generate-endpoint");
-const klingApiRoute = require("./klingApi"); // (NEW) Kling API Route
+const klingApiRoute = require("./klingApi"); // Kling API Route
+
+// --- HEALTH & ROOT ROUTES ---
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", message: "Backend is live!" });
+});
+
+app.get("/", (req, res) => {
+  res.send("Mogibaai backend is running!");
+});
 
 // --- USE ROUTES ---
 app.use("/api", vertexImagenRoute);
 app.use("/api", vertexImagen4FastRoute);
 app.use("/api/payments", razorpayRoute);
-app.use("/api/kling", klingApiRoute); // NEW: Kling AI API (supports POST + GET status)
+app.use("/api/kling", klingApiRoute); // Kling AI API (supports POST + GET status)
 
 // --- SERVER START ---
-app.listen(4000, () => {
-  console.log("✅ Server started on http://localhost:4000");
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => {
+  console.log(`✅ Server started on http://localhost:${PORT}`);
 });
