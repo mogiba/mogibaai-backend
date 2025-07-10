@@ -1,18 +1,16 @@
-// index.js (Express backend main entry)
+// index.js (Express backend main entry - Render.com Secret File version)
 
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config(); // Load .env variables
 
-// --- GOOGLE SA KEY: Create sa-key.json at runtime from env var (must for Render/production) ---
+// --- GOOGLE SA KEY: Use Secret File on Render.com ---
 const fs = require("fs");
 const path = require("path");
-if (process.env.GOOGLE_SA_KEY_B64) {
-  const saPath = path.join(__dirname, "sa-key.json");
-  fs.writeFileSync(
-    saPath,
-    Buffer.from(process.env.GOOGLE_SA_KEY_B64, "base64").toString("utf-8")
-  );
+
+const saKeyPath = "/etc/secrets/sa-key.json"; // Render.com Secret File path
+if (!fs.existsSync(saKeyPath)) {
+  throw new Error("Google Service Account key file (sa-key.json) not found at /etc/secrets/sa-key.json. Please upload in Render.com Secret Files.");
 }
 
 const app = express();
