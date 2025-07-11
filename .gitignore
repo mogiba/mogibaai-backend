@@ -1,4 +1,9 @@
+# Node modules
+node_modules/
+# Env files
 .env
-*key.json
-*.env
-*.pem
+# Service account / secret keys (manually upload to Render.com or Google Cloud only)
+*.json
+sa-key.json
+mogibaai-storage-key.json
+/etc/secrets/

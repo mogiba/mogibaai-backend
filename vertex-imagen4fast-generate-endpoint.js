@@ -2,8 +2,9 @@ const express = require("express");
 const router = express.Router();
 const { GoogleAuth } = require("google-auth-library");
 require("dotenv").config();
-const uploadImageToStorage = require("./upload"); // <-- Already correct
+const uploadImageToStorage = require("./upload");
 
+// Imagen 4 Fast endpoint
 router.post("/google-imagen-fast", async (req, res) => {
   const { prompt, size = "1024x1024", userId = "public" } = req.body;
 
@@ -11,7 +12,7 @@ router.post("/google-imagen-fast", async (req, res) => {
     return res.status(400).json({ error: "Prompt is required" });
   }
 
-  // Supported aspect ratios for Google Imagen 4 Fast
+  // Aspect ratios mapping
   const aspectRatioMap = {
     "1024x1024": "1:1",
     "1024x1536": "2:3",
@@ -25,8 +26,8 @@ router.post("/google-imagen-fast", async (req, res) => {
   }
 
   try {
-    // === USE SECRET FILE ABSOLUTE PATH ===
-    const saKeyPath = "/etc/secrets/mogibaai-storage-key.json"; // CHANGE HERE!
+    // Use Render/Production secret file path!
+    const saKeyPath = "/etc/secrets/mogibaai-storage-key.json";
     const auth = new GoogleAuth({
       keyFilename: saKeyPath,
       scopes: "https://www.googleapis.com/auth/cloud-platform",
@@ -34,7 +35,6 @@ router.post("/google-imagen-fast", async (req, res) => {
 
     const client = await auth.getClient();
     const projectId = process.env.GOOGLE_PROJECT_ID;
-    // **ONLY DIFFERENCE IS THIS URL!**
     const predictUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/imagen-4.0-generate-preview-06-06:predict`;
 
     const body = {
@@ -42,13 +42,12 @@ router.post("/google-imagen-fast", async (req, res) => {
       parameters: {
         sampleCount: 1,
         aspectRatio: aspectRatioMap[size]
-      },
+      }
     };
 
     const response = await client.request({ url: predictUrl, method: "POST", data: body });
 
-    // === SAFE CHECK START ===
-    // Debug: Log full response for debugging
+    // Log response for debug
     console.log("Google Imagen 4 Fast response:", response.data);
 
     if (
@@ -60,7 +59,6 @@ router.post("/google-imagen-fast", async (req, res) => {
       console.error("❌ Google Imagen 4 Fast error: No predictions found", response.data);
       return res.status(500).json({ error: "Image generation failed (no predictions found)", details: response.data });
     }
-    // === SAFE CHECK END ===
 
     const imageBase64 = response.data.predictions[0].bytesBase64Encoded;
     const buffer = Buffer.from(imageBase64, "base64");
@@ -68,7 +66,6 @@ router.post("/google-imagen-fast", async (req, res) => {
     const publicUrl = await uploadImageToStorage(buffer, filename, "image/jpeg");
 
     res.json({ imageUrl: publicUrl });
-
   } catch (err) {
     console.error("❌ Google Imagen 4 Fast error:", err.response?.data || err.message);
     res.status(500).json({ error: "Image generation failed", details: err.message });

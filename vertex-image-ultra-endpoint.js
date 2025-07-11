@@ -2,11 +2,12 @@ const express = require("express");
 const router = express.Router();
 const { GoogleAuth } = require("google-auth-library");
 require("dotenv").config();
-const uploadImageToStorage = require("./upload"); // <-- This is your image upload helper
+const uploadImageToStorage = require("./upload"); // Helper function for Google Storage upload
 
-// Use Render.com secret file ABSOLUTE PATH
+// Use absolute path for Render.com Secret Files!
 const saKeyPath = "/etc/secrets/mogibaai-storage-key.json";
 
+// Imagen 4 Ultra endpoint
 router.post("/google-imagen", async (req, res) => {
   const { prompt, size = "1024x1024", userId = "public" } = req.body;
 
@@ -14,7 +15,7 @@ router.post("/google-imagen", async (req, res) => {
     return res.status(400).json({ error: "Prompt is required" });
   }
 
-  // Supported aspect ratios for Google Imagen 4
+  // Supported aspect ratios for Google Imagen 4 Ultra
   const aspectRatioMap = {
     "1024x1024": "1:1",
     "1024x1536": "2:3",
@@ -24,31 +25,32 @@ router.post("/google-imagen", async (req, res) => {
   };
 
   if (!aspectRatioMap[size]) {
-    return res.status(400).json({ error: "Selected size not supported for Imagen 4" });
+    return res.status(400).json({ error: "Selected size not supported for Imagen 4 Ultra" });
   }
 
   try {
     const auth = new GoogleAuth({
-      keyFilename: saKeyPath, // ALWAYS use absolute path for Render.com secrets
+      keyFilename: saKeyPath,
       scopes: "https://www.googleapis.com/auth/cloud-platform",
     });
 
     const client = await auth.getClient();
     const projectId = process.env.GOOGLE_PROJECT_ID;
-    const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/imagen-4.0-generate-preview-06-06:predict`;
+    // ULTRA model endpoint!
+    const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/imagen-4.0-ultra-generate-preview-06-06:predict`;
 
     const body = {
       instances: [{ prompt }],
       parameters: {
         sampleCount: 1,
         aspectRatio: aspectRatioMap[size]
-      },
+      }
     };
 
     const response = await client.request({ url, method: "POST", data: body });
 
-    // Debug log for troubleshooting
-    console.log("Google Imagen response:", response.data);
+    // Log for debugging
+    console.log("Google Imagen 4 Ultra response:", response.data);
 
     if (
       !response.data.predictions ||
@@ -56,7 +58,7 @@ router.post("/google-imagen", async (req, res) => {
       !response.data.predictions[0] ||
       !response.data.predictions[0].bytesBase64Encoded
     ) {
-      console.error("❌ Google Imagen error: No predictions found", response.data);
+      console.error("❌ Google Imagen 4 Ultra error: No predictions found", response.data);
       return res.status(500).json({ error: "Image generation failed (no predictions found)", details: response.data });
     }
 
@@ -68,7 +70,7 @@ router.post("/google-imagen", async (req, res) => {
     res.json({ imageUrl: publicUrl });
 
   } catch (err) {
-    console.error("❌ Google Imagen error:", err.response?.data || err.message);
+    console.error("❌ Google Imagen 4 Ultra error:", err.response?.data || err.message);
     res.status(500).json({ error: "Image generation failed", details: err.message });
   }
 });
