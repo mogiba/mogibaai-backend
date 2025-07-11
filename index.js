@@ -33,10 +33,10 @@ app.use(cors());
 const vertexImageUltraRoute = require("./vertex-image-ultra-endpoint");
 // FAST model
 const vertexImageFastRoute = require("./vertex-imagen4fast-generate-endpoint");
+// Kling AI txt2img
+const klingTxt2ImgRoute = require("./kling-txt2img");
 // Payments (Razorpay)
 const razorpayRoute = require("./razorpay");
-// Kling API
-const klingApiRoute = require("./klingApi");
 
 // --- HEALTH & ROOT ROUTES ---
 app.get("/health", (req, res) => {
@@ -50,8 +50,8 @@ app.get("/", (req, res) => {
 // --- USE ROUTES (PRODUCTION ENDPOINTS) ---
 app.use("/api", vertexImageUltraRoute);         // /api/google-imagen-ultra
 app.use("/api", vertexImageFastRoute);          // /api/google-imagen-fast
+app.use("/api", klingTxt2ImgRoute);             // /api/kling-txt2img (Kling txt2img endpoint)
 app.use("/api/payments", razorpayRoute);        // Razorpay payment
-app.use("/api/kling", klingApiRoute);           // Kling API (supports POST + GET status)
 
 // --- SERVER START ---
 const PORT = process.env.PORT || 4000;
