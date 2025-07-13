@@ -9,8 +9,8 @@ const fs = require("fs");
 const path = require("path");
 
 // IMPORTANT: Render.com lo /etc/secrets/sa-key.json & mogibaai-storage-key.json renditini upload cheyyali
-const saKeyPath = "/etc/secrets/sa-key.json"; // Main service account
-const storageKeyPath = "/etc/secrets/mogibaai-storage-key.json"; // Storage access (if needed)
+const saKeyPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.join(__dirname, "./secrets/sa-key.json");
+const storageKeyPath = process.env.GOOGLE_STORAGE_KEY || path.join(__dirname, "./secrets/mogibaai-storage-key.json");
 
 if (!fs.existsSync(saKeyPath)) {
   throw new Error("Google Service Account key file (sa-key.json) not found at /etc/secrets/sa-key.json. Please upload in Render.com Secret Files.");

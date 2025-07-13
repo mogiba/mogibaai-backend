@@ -4,6 +4,19 @@ node_modules/
 .env
 # Service account / secret keys (manually upload to Render.com or Google Cloud only)
 *.json
+/etc/secrets/
+# Node
+secrets/
+*.log
+
+# Ignore secret keys (never push)
 sa-key.json
 mogibaai-storage-key.json
-/etc/secrets/
+
+# VSCode or JetBrains configs
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db
