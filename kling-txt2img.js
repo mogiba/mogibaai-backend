@@ -6,7 +6,7 @@ const { generateKlingJwt } = require('./utils/klingJwt');
 
 const KLING_API_BASE = 'https://api-singapore.klingai.com/v1';
 
-router.post('/api/kling-txt2img', async (req, res) => {
+router.post('/kling-txt2img', async (req, res) => {
   try {
     // 1. Input validation
     const { prompt, negative_prompt = '', resolution = '2k', n = 2, aspect_ratio = '16:9' } = req.body;
