@@ -7,6 +7,9 @@ const { generateKlingJwt } = require('./utils/klingJwt');
 const KLING_API_BASE = 'https://api-singapore.klingai.com/v1';
 
 router.post('/kling-txt2img', async (req, res) => {
+  // LOG incoming payload
+  console.log('Kling API request body:', req.body);
+
   try {
     // 1. Input validation
     const { prompt, negative_prompt = '', resolution = '2k', n = 2, aspect_ratio = '16:9' } = req.body;
@@ -51,14 +54,16 @@ router.post('/kling-txt2img', async (req, res) => {
         break;
       }
       if (pollRes.data?.status === 'failed') {
+        console.error('Kling polling error:', pollRes.data);
         return res.status(500).json({ error: 'Kling API failed: ' + (pollRes.data.message || '') });
       }
     }
     if (!done) return res.status(504).json({ error: 'Timed out waiting for Kling image' });
 
     // 5. Success
-    return res.json({ imageUrls: result, status: 'succeeded' });
+    return res.json({ imageUrl: result, status: 'succeeded' });
   } catch (err) {
+    // LOG error details (including response from Kling API)
     console.error('Kling API error:', err.message, err?.response?.data || '');
     return res.status(500).json({ error: 'Internal error: ' + err.message });
   }
