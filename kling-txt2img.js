@@ -7,7 +7,6 @@ const { generateKlingJwt } = require('./utils/klingJwt');
 const KLING_API_BASE = 'https://api-singapore.klingai.com/v1';
 
 router.post('/kling-txt2img', async (req, res) => {
-  // LOG incoming payload
   console.log('Kling API request body:', req.body);
 
   try {
@@ -36,11 +35,13 @@ router.post('/kling-txt2img', async (req, res) => {
         }
       }
     );
-    const { task_id } = generationRes.data;
-    if (!task_id) return res.status(500).json({ error: 'Kling API: No task_id' });
+
+    // *** task_id structure fix ***
+    let task_id = generationRes.data?.data?.task_id || generationRes.data?.task_id;
+    if (!task_id) return res.status(500).json({ error: 'Kling API: No task_id', raw: generationRes.data });
 
     // 4. Poll for result
-    let tries = 0, maxTries = 50, result, done = false;
+    let tries = 0, maxTries = 50, result = [], done = false;
     while (tries < maxTries) {
       await new Promise(resolve => setTimeout(resolve, 3000)); // wait 3 seconds
       tries++;
@@ -48,14 +49,15 @@ router.post('/kling-txt2img', async (req, res) => {
         `${KLING_API_BASE}/images/generations/${task_id}`,
         { headers: { Authorization: `Bearer ${jwtToken}` } }
       );
-      if (pollRes.data?.status === 'succeeded' && Array.isArray(pollRes.data.images)) {
-        result = pollRes.data.images.map(img => img.url);
+      // *** images structure fix ***
+      const images = pollRes.data?.data?.task_result?.images || pollRes.data?.images;
+      if (pollRes.data?.data?.task_status === 'succeeded' && Array.isArray(images)) {
+        result = images.map(img => img.url);
         done = true;
         break;
       }
-      if (pollRes.data?.status === 'failed') {
-        console.error('Kling polling error:', pollRes.data);
-        return res.status(500).json({ error: 'Kling API failed: ' + (pollRes.data.message || '') });
+      if (pollRes.data?.data?.task_status === 'failed') {
+        return res.status(500).json({ error: 'Kling API failed: ' + (pollRes.data.message || ''), raw: pollRes.data });
       }
     }
     if (!done) return res.status(504).json({ error: 'Timed out waiting for Kling image' });
@@ -63,14 +65,8 @@ router.post('/kling-txt2img', async (req, res) => {
     // 5. Success
     return res.json({ imageUrl: result, status: 'succeeded' });
   } catch (err) {
-    // LOG error details (full object in JSON)
-    try {
-      console.error('Kling API error:', JSON.stringify(err, null, 2));
-    } catch (e) {
-      // Fallback for non-serializable error
-      console.error('Kling API error (raw):', err);
-    }
-    return res.status(500).json({ error: 'Internal error: ' + (err.message || '') });
+    console.error('Kling API error:', JSON.stringify(err, null, 2));
+    return res.status(500).json({ error: 'Internal error: ' + (err.message || ''), raw: err });
   }
 });
 
