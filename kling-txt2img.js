@@ -63,12 +63,14 @@ router.post('/kling-txt2img', async (req, res) => {
     // 5. Success
     return res.json({ imageUrl: result, status: 'succeeded' });
   } catch (err) {
-    // LOG error details (including response from Kling API)
-    console.error('Kling API error:', err.message, err?.response?.data || '');
-    // LOG full error object
-    console.error('Kling API FULL ERROR:', err);
-
-    return res.status(500).json({ error: 'Internal error: ' + err.message });
+    // LOG error details (full object in JSON)
+    try {
+      console.error('Kling API error:', JSON.stringify(err, null, 2));
+    } catch (e) {
+      // Fallback for non-serializable error
+      console.error('Kling API error (raw):', err);
+    }
+    return res.status(500).json({ error: 'Internal error: ' + (err.message || '') });
   }
 });
 
