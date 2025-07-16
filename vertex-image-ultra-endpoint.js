@@ -8,7 +8,7 @@ const uploadImageToStorage = require("./upload"); // Helper function for Google 
 const saKeyPath = "/etc/secrets/mogibaai-storage-key.json";
 
 // Imagen 4 Ultra endpoint
-router.post("/google-imagen", async (req, res) => {
+router.post("/google-imagen-ultra", async (req, res) => {
   const { prompt, size = "1024x1024", userId = "public" } = req.body;
 
   if (!prompt) {
