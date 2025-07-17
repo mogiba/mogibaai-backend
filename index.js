@@ -1,44 +1,42 @@
-// index.js (Express backend main entry – Render.com Secret File version, multi-model support)
-
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config(); // Load .env variables
-
-// --- GOOGLE SA KEY: Use Secret File on Render.com ---
+require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 
-// IMPORTANT: Render.com lo /etc/secrets/sa-key.json & mogibaai-storage-key.json renditini upload cheyyali
+// --- GOOGLE SA KEY: Use Secret File on Render.com ---
 const saKeyPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.join(__dirname, "./secrets/sa-key.json");
 const storageKeyPath = process.env.GOOGLE_STORAGE_KEY || path.join(__dirname, "./secrets/mogibaai-storage-key.json");
 
+// Check if secret files exist & log
 if (!fs.existsSync(saKeyPath)) {
-  throw new Error("Google Service Account key file (sa-key.json) not found at /etc/secrets/sa-key.json. Please upload in Render.com Secret Files.");
+  console.error(`❌ Google Service Account key file NOT found at ${saKeyPath}`);
+  throw new Error(`Google Service Account key file not found at ${saKeyPath}. Please upload in Render.com Secret Files.`);
+} else {
+  console.log(`✅ Google Service Account key file found at ${saKeyPath}`);
 }
 if (!fs.existsSync(storageKeyPath)) {
-  throw new Error("Google Storage key file (mogibaai-storage-key.json) not found at /etc/secrets/mogibaai-storage-key.json. Please upload in Render.com Secret Files.");
+  console.error(`❌ Google Storage key file NOT found at ${storageKeyPath}`);
+  throw new Error(`Google Storage key file not found at ${storageKeyPath}. Please upload in Render.com Secret Files.`);
+} else {
+  console.log(`✅ Google Storage key file found at ${storageKeyPath}`);
 }
 
-// Set as env for Google SDKs (in case)
+// Set environment variable for Google SDKs
 process.env.GOOGLE_APPLICATION_CREDENTIALS = saKeyPath;
 
 const app = express();
 
-// --- Middlewares ---
-app.use(express.json({ limit: "20mb" })); // Large images, bump up if needed
+app.use(express.json({ limit: "20mb" }));
 app.use(cors());
 
-// --- IMPORT ROUTES (NEW MULTI-MODEL) ---
-// ULTRA model
+// Import routes
 const vertexImageUltraRoute = require("./vertex-image-ultra-endpoint");
-// FAST model
 const vertexImageFastRoute = require("./vertex-imagen4fast-generate-endpoint");
-// Kling AI txt2img
 const klingTxt2ImgRoute = require("./kling-txt2img");
-// Payments (Razorpay)
 const razorpayRoute = require("./razorpay");
 
-// --- HEALTH & ROOT ROUTES ---
+// Health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok", message: "Backend is live!" });
 });
@@ -47,14 +45,15 @@ app.get("/", (req, res) => {
   res.send("Mogibaai backend is running!");
 });
 
-// --- USE ROUTES (PRODUCTION ENDPOINTS) ---
-app.use("/api", vertexImageUltraRoute);         // /api/google-imagen-ultra
-app.use("/api", vertexImageFastRoute);          // /api/google-imagen-fast
-app.use("/api", klingTxt2ImgRoute);             // /api/kling-txt2img (Kling txt2img endpoint)
-app.use("/api/payments", razorpayRoute);        // Razorpay payment
+// Use routes
+app.use("/api", vertexImageUltraRoute);
+app.use("/api", vertexImageFastRoute);
+app.use("/api", klingTxt2ImgRoute);
+app.use("/api/payments", razorpayRoute);
 
-// --- SERVER START ---
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`✅ Server started on http://localhost:${PORT}`);
+  console.log(`Using SA Key path: ${saKeyPath}`);
+  console.log(`Using Storage Key path: ${storageKeyPath}`);
 });
