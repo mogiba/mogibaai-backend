@@ -26,6 +26,7 @@ const ASPECT_RATIO_MAP = {
   'Wide 16:9': '16:9',
 };
 
+// --- POST: Create image generation task ---
 router.post('/kling-txt2img', async (req, res) => {
   const {
     prompt,
@@ -54,19 +55,14 @@ router.post('/kling-txt2img', async (req, res) => {
   if (!finalAspect) finalAspect = DEFAULTS.aspect_ratio;
 
   console.log('Kling API Request:', {
-    prompt,
-    negative_prompt,
-    finalResolution,
-    finalAspect,
-    n,
-    apiKeyExists: Boolean(process.env.KLING_API_KEY),
-    apiSecretExists: Boolean(process.env.KLING_API_SECRET),
+    prompt, negative_prompt, finalResolution, finalAspect, n, jwtExists: !!process.env.KLING_JWT
   });
 
   try {
     const response = await axios.post(
-      `${KLING_API_BASE}/generate-image`,
+      `${KLING_API_BASE}/images/generations`,
       {
+        model_name: "kling-v2",
         prompt,
         negative_prompt,
         resolution: finalResolution,
@@ -76,16 +72,108 @@ router.post('/kling-txt2img', async (req, res) => {
       {
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': process.env.KLING_API_KEY,
-          'x-api-secret': process.env.KLING_API_SECRET,
+          'Authorization': `Bearer ${process.env.KLING_JWT}`,
         },
         timeout: 20000,
       }
     );
-    return res.json(response.data);
+    return res.json(response.data); // { data: { task_id: ... } }
   } catch (e) {
     console.error('Kling AI error:', e.response?.data || e.message, e.response?.status);
     return res.status(500).json({ error: 'Kling request failed', details: e.response?.data || e.message });
+  }
+});
+
+// --- GET: Poll for image result by taskId ---
+router.get('/kling-txt2img/:taskId', async (req, res) => {
+  const { taskId } = req.params;
+  if (!taskId) return res.status(400).json({ error: 'Missing taskId.' });
+
+  try {
+    const response = await axios.get(
+      `${KLING_API_BASE}/images/generations/${taskId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.KLING_JWT}`,
+        },
+        timeout: 15000,
+      }
+    );
+    return res.json(response.data); // Kling API will give status/images etc
+  } catch (e) {
+    console.error('Kling polling error:', e.response?.data || e.message, e.response?.status);
+    return res.status(500).json({ error: 'Kling polling failed', details: e.response?.data || e.message });
+  }
+});
+
+// --- POST: Auto-wait for image result (server-side polling) ---
+async function pollKlingResult(taskId, jwt, maxTries = 15, interval = 2000) {
+  for (let i = 0; i < maxTries; i++) {
+    try {
+      const resp = await axios.get(
+        `${KLING_API_BASE}/images/generations/${taskId}`,
+        { headers: { 'Authorization': `Bearer ${jwt}` } }
+      );
+      const status = resp.data?.data?.task_status;
+      if (status === 'completed') {
+        return resp.data?.data?.task_result?.images || [];
+      } else if (status === 'failed') {
+        throw new Error("Kling task failed.");
+      }
+      // Else pending/running, just wait
+    } catch (err) {
+      if (i === maxTries - 1) throw err;
+    }
+    await new Promise(resolve => setTimeout(resolve, interval)); // Wait before next try
+  }
+  throw new Error('Kling polling timed out');
+}
+
+router.post('/kling-txt2img/auto', async (req, res) => {
+  const {
+    prompt,
+    negative_prompt = '',
+    generation_mode,
+    image_size,
+    resolution,
+    aspect_ratio,
+    n = 1
+  } = req.body;
+
+  let finalResolution = resolution || '1024x1024';
+  let finalAspect = aspect_ratio || '1:1';
+
+  try {
+    // Step 1: Request image generation (get task_id)
+    const resp = await axios.post(
+      `${KLING_API_BASE}/images/generations`,
+      {
+        model_name: "kling-v2",
+        prompt,
+        negative_prompt,
+        resolution: finalResolution,
+        n,
+        aspect_ratio: finalAspect,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.KLING_JWT}`,
+        }
+      }
+    );
+    const taskId = resp.data?.data?.task_id;
+    if (!taskId) return res.status(500).json({ error: 'No task_id from Kling.' });
+
+    // Step 2: Poll until complete
+    const images = await pollKlingResult(taskId, process.env.KLING_JWT);
+    if (!images.length) return res.status(500).json({ error: 'No images returned from Kling.' });
+
+    // Step 3: Done!
+    return res.json({ task_id: taskId, images });
+  } catch (err) {
+    console.error("Kling auto-wait error:", err.response?.data || err.message);
+    return res.status(500).json({ error: "Kling polling failed", details: err.response?.data || err.message });
   }
 });
 
