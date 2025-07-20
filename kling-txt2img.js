@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 require('dotenv').config();
+const { generateKlingJwt } = require('../utils/klingJwt'); // Path as per your project
 
 const KLING_API_BASE = 'https://api-singapore.klingai.com/v1';
 
@@ -54,9 +55,7 @@ router.post('/kling-txt2img', async (req, res) => {
   if (!finalResolution) finalResolution = DEFAULTS.resolution;
   if (!finalAspect) finalAspect = DEFAULTS.aspect_ratio;
 
-  console.log('Kling API Request:', {
-    prompt, negative_prompt, finalResolution, finalAspect, n, jwtExists: !!process.env.KLING_JWT
-  });
+  const jwtToken = generateKlingJwt();
 
   try {
     const response = await axios.post(
@@ -72,12 +71,12 @@ router.post('/kling-txt2img', async (req, res) => {
       {
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.KLING_JWT}`,
+          'Authorization': `Bearer ${jwtToken}`,
         },
         timeout: 20000,
       }
     );
-    return res.json(response.data); // { data: { task_id: ... } }
+    return res.json(response.data);
   } catch (e) {
     console.error('Kling AI error:', e.response?.data || e.message, e.response?.status);
     return res.status(500).json({ error: 'Kling request failed', details: e.response?.data || e.message });
@@ -89,24 +88,26 @@ router.get('/kling-txt2img/:taskId', async (req, res) => {
   const { taskId } = req.params;
   if (!taskId) return res.status(400).json({ error: 'Missing taskId.' });
 
+  const jwtToken = generateKlingJwt();
+
   try {
     const response = await axios.get(
       `${KLING_API_BASE}/images/generations/${taskId}`,
       {
         headers: {
-          'Authorization': `Bearer ${process.env.KLING_JWT}`,
+          'Authorization': `Bearer ${jwtToken}`,
         },
         timeout: 15000,
       }
     );
-    return res.json(response.data); // Kling API will give status/images etc
+    return res.json(response.data);
   } catch (e) {
     console.error('Kling polling error:', e.response?.data || e.message, e.response?.status);
     return res.status(500).json({ error: 'Kling polling failed', details: e.response?.data || e.message });
   }
 });
 
-// --- POST: Auto-wait for image result (server-side polling) ---
+// --- Polling helper ---
 async function pollKlingResult(taskId, jwt, maxTries = 15, interval = 2000) {
   for (let i = 0; i < maxTries; i++) {
     try {
@@ -120,15 +121,16 @@ async function pollKlingResult(taskId, jwt, maxTries = 15, interval = 2000) {
       } else if (status === 'failed') {
         throw new Error("Kling task failed.");
       }
-      // Else pending/running, just wait
+      // Else, keep polling
     } catch (err) {
       if (i === maxTries - 1) throw err;
     }
-    await new Promise(resolve => setTimeout(resolve, interval)); // Wait before next try
+    await new Promise(resolve => setTimeout(resolve, interval));
   }
   throw new Error('Kling polling timed out');
 }
 
+// --- POST: Auto-wait for image result (server-side polling) ---
 router.post('/kling-txt2img/auto', async (req, res) => {
   const {
     prompt,
@@ -142,6 +144,8 @@ router.post('/kling-txt2img/auto', async (req, res) => {
 
   let finalResolution = resolution || '1024x1024';
   let finalAspect = aspect_ratio || '1:1';
+
+  const jwtToken = generateKlingJwt();
 
   try {
     // Step 1: Request image generation (get task_id)
@@ -158,7 +162,7 @@ router.post('/kling-txt2img/auto', async (req, res) => {
       {
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.KLING_JWT}`,
+          'Authorization': `Bearer ${jwtToken}`,
         }
       }
     );
@@ -166,7 +170,7 @@ router.post('/kling-txt2img/auto', async (req, res) => {
     if (!taskId) return res.status(500).json({ error: 'No task_id from Kling.' });
 
     // Step 2: Poll until complete
-    const images = await pollKlingResult(taskId, process.env.KLING_JWT);
+    const images = await pollKlingResult(taskId, jwtToken);
     if (!images.length) return res.status(500).json({ error: 'No images returned from Kling.' });
 
     // Step 3: Done!
