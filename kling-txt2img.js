@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 require('dotenv').config();
-const { generateKlingJwt } = require('../utils/klingJwt'); // Path as per your project
+const { generateKlingJwt } = require('./utils/klingJwt'); // Path as per your project
 
 const KLING_API_BASE = 'https://api-singapore.klingai.com/v1';
 
