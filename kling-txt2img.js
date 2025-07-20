@@ -1,3 +1,4 @@
+// kling-txt2img.js
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
@@ -5,74 +6,20 @@ const { generateKlingJwt } = require('./utils/klingJwt');
 
 const KLING_API_BASE = 'https://api-singapore.klingai.com/v1';
 
-// --- 1. Fire-and-Get-TaskID (Non-blocking, client must poll GET with task_id) ---
+// --- POST: Blocking (fire-and-wait) version ---
 router.post('/kling-txt2img', async (req, res) => {
+  console.log('=== Kling API request body:', req.body);
+
   try {
+    // 1. Input validation
     const { prompt, negative_prompt = '', resolution = '2k', n = 2, aspect_ratio = '16:9' } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
 
+    // 2. JWT generate
     const jwtToken = generateKlingJwt();
+    console.log('=== Generated JWT:', jwtToken.substring(0, 40) + '...');
 
-    const response = await axios.post(
-      `${KLING_API_BASE}/images/generations`,
-      {
-        model_name: 'kling-v2',
-        prompt,
-        negative_prompt,
-        resolution,
-        n,
-        aspect_ratio
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${jwtToken}`,
-        }
-      }
-    );
-
-    const task_id = response.data?.data?.task_id || response.data?.task_id;
-    if (!task_id) {
-      return res.status(500).json({ error: 'Kling API: No task_id', raw: response.data });
-    }
-
-    return res.json({ task_id, status: 'submitted' });
-
-  } catch (err) {
-    try { console.error('Kling API error:', JSON.stringify(err, null, 2)); }
-    catch (e) { console.error('Kling API error:', err); }
-    return res.status(500).json({ error: 'Internal error: ' + (err.message || ''), raw: err });
-  }
-});
-
-// --- 2. GET poll by taskId ---
-router.get('/kling-txt2img/:taskId', async (req, res) => {
-  const { taskId } = req.params;
-  if (!taskId) return res.status(400).json({ error: 'Missing taskId.' });
-
-  try {
-    const jwtToken = generateKlingJwt();
-    const pollRes = await axios.get(
-      `${KLING_API_BASE}/images/generations/${taskId}`,
-      { headers: { Authorization: `Bearer ${jwtToken}` } }
-    );
-    return res.json(pollRes.data);
-  } catch (err) {
-    try { console.error('Kling polling error:', JSON.stringify(err, null, 2)); }
-    catch (e) { console.error('Kling polling error:', err); }
-    return res.status(500).json({ error: 'Polling failed: ' + (err.message || ''), raw: err });
-  }
-});
-
-// --- 3. Fire-and-Wait (blocking, backend polls until done or timeout) ---
-router.post('/kling-txt2img/auto', async (req, res) => {
-  try {
-    const { prompt, negative_prompt = '', resolution = '2k', n = 2, aspect_ratio = '16:9' } = req.body;
-    if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
-
-    const jwtToken = generateKlingJwt();
-
-    // Step 1: Request image generation (get task_id)
+    // 3. POST: Start Image Generation
     const generationRes = await axios.post(
       `${KLING_API_BASE}/images/generations`,
       {
@@ -91,40 +38,84 @@ router.post('/kling-txt2img/auto', async (req, res) => {
       }
     );
 
-    const task_id = generationRes.data?.data?.task_id || generationRes.data?.task_id;
+    // *** task_id structure fix ***
+    let task_id = generationRes.data?.data?.task_id || generationRes.data?.task_id;
     if (!task_id) {
+      console.error('=== ERROR: No task_id', generationRes.data);
       return res.status(500).json({ error: 'Kling API: No task_id', raw: generationRes.data });
     }
+    console.log('=== Received task_id:', task_id);
 
-    // Step 2: Poll until done or timeout (fire-and-wait)
+    // 4. Wait before polling (Kling API needs a second to initialize the task)
+    await new Promise(resolve => setTimeout(resolve, 3000)); // 3 seconds
+
+    // 5. Poll for result
     let tries = 0, maxTries = 60, result = [], done = false;
     while (tries < maxTries) {
-      await new Promise(resolve => setTimeout(resolve, 6000));
       tries++;
-      const pollRes = await axios.get(
-        `${KLING_API_BASE}/images/generations/${task_id}`,
-        { headers: { Authorization: `Bearer ${jwtToken}` } }
-      );
-      const images = pollRes.data?.data?.task_result?.images || pollRes.data?.images;
-      const status = pollRes.data?.data?.task_status || pollRes.data?.status;
+      // Optionally: Generate fresh token for polling, if Kling API ever needs it.
+      const pollJwt = generateKlingJwt();
+      try {
+        const pollRes = await axios.get(
+          `${KLING_API_BASE}/images/generations/${task_id}`,
+          { headers: { Authorization: `Bearer ${pollJwt}` } }
+        );
 
-      if (status === 'succeeded' && Array.isArray(images)) {
-        result = images.map(img => img.url);
-        done = true;
-        break;
+        // LOG poll status every try
+        console.log(`[Kling][${task_id}] poll #${tries}:`, JSON.stringify(pollRes.data));
+
+        // *** images structure fix ***
+        const images = pollRes.data?.data?.task_result?.images || pollRes.data?.images;
+        const status = pollRes.data?.data?.task_status || pollRes.data?.status;
+
+        if (status === 'succeeded' && Array.isArray(images)) {
+          result = images.map(img => img.url);
+          done = true;
+          break;
+        }
+        if (status === 'failed') {
+          return res.status(500).json({ error: 'Kling API failed: ' + (pollRes.data.message || ''), raw: pollRes.data });
+        }
+      } catch (pollErr) {
+        // Kling poll endpoint is sometimes slow to respond if you poll too quickly after POST
+        console.error(`[Kling][${task_id}] poll #${tries} error:`, pollErr.response?.data || pollErr.message);
       }
-      if (status === 'failed') {
-        return res.status(500).json({ error: 'Kling API failed: ' + (pollRes.data.message || ''), raw: pollRes.data });
-      }
+      // Wait between polls
+      await new Promise(resolve => setTimeout(resolve, 4000)); // 4 seconds
     }
     if (!done) return res.status(504).json({ error: 'Timed out waiting for Kling image' });
 
+    // 6. Success
     return res.json({ imageUrl: result, status: 'succeeded', task_id });
 
   } catch (err) {
-    try { console.error('Kling API error:', JSON.stringify(err, null, 2)); }
-    catch (e) { console.error('Kling API error:', err); }
+    // Print the entire error object for deep debugging
+    try {
+      console.error('Kling API error:', JSON.stringify(err, null, 2));
+    } catch (e) {
+      console.error('Kling API error:', err);
+    }
     return res.status(500).json({ error: 'Internal error: ' + (err.message || ''), raw: err });
+  }
+});
+
+// --- GET: Poll by taskId (stateless, frontend polling) ---
+router.get('/kling-txt2img/:taskId', async (req, res) => {
+  const { taskId } = req.params;
+  if (!taskId) return res.status(400).json({ error: 'Missing taskId.' });
+
+  try {
+    const jwtToken = generateKlingJwt();
+    const pollRes = await axios.get(
+      `${KLING_API_BASE}/images/generations/${taskId}`,
+      { headers: { Authorization: `Bearer ${jwtToken}` } }
+    );
+    // Return Kling raw result (so frontend can check status/images itself)
+    return res.json(pollRes.data);
+  } catch (err) {
+    try { console.error('Kling polling error:', JSON.stringify(err, null, 2)); }
+    catch (e) { console.error('Kling polling error:', err); }
+    return res.status(500).json({ error: 'Polling failed: ' + (err.message || ''), raw: err });
   }
 });
 
