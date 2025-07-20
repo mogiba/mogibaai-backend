@@ -11,15 +11,12 @@ router.post('/kling-txt2img', async (req, res) => {
   console.log('=== Kling API request body:', req.body);
 
   try {
-    // 1. Input validation
     const { prompt, negative_prompt = '', resolution = '2k', n = 2, aspect_ratio = '16:9' } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
 
-    // 2. JWT generate
     const jwtToken = generateKlingJwt();
     console.log('=== Generated JWT:', jwtToken.substring(0, 40) + '...');
 
-    // 3. POST: Start Image Generation
     const generationRes = await axios.post(
       `${KLING_API_BASE}/images/generations`,
       {
@@ -38,7 +35,6 @@ router.post('/kling-txt2img', async (req, res) => {
       }
     );
 
-    // *** task_id structure fix ***
     let task_id = generationRes.data?.data?.task_id || generationRes.data?.task_id;
     if (!task_id) {
       console.error('=== ERROR: No task_id', generationRes.data);
@@ -46,29 +42,23 @@ router.post('/kling-txt2img', async (req, res) => {
     }
     console.log('=== Received task_id:', task_id);
 
-    // 4. Wait before polling (Kling API needs a second to initialize the task)
-    await new Promise(resolve => setTimeout(resolve, 3000)); // 3 seconds
+    // Initial wait before polling
+    await new Promise(resolve => setTimeout(resolve, 2500)); // 2.5 seconds
 
-    // 5. Poll for result
-    let tries = 0, maxTries = 60, result = [], done = false;
+    // Dynamic Polling
+    let tries = 0, maxTries = 40, result = [], done = false;
     while (tries < maxTries) {
       tries++;
-      // Optionally: Generate fresh token for polling, if Kling API ever needs it.
       const pollJwt = generateKlingJwt();
       try {
         const pollRes = await axios.get(
           `${KLING_API_BASE}/images/generations/${task_id}`,
           { headers: { Authorization: `Bearer ${pollJwt}` } }
         );
-
-        // LOG poll status every try
         console.log(`[Kling][${task_id}] poll #${tries}:`, JSON.stringify(pollRes.data));
-
-        // *** images structure fix ***
         const images = pollRes.data?.data?.task_result?.images || pollRes.data?.images;
         const status = pollRes.data?.data?.task_status || pollRes.data?.status;
-
-        if (status === 'succeeded' && Array.isArray(images)) {
+        if ((status === 'succeeded' || status === 'completed') && Array.isArray(images)) {
           result = images.map(img => img.url);
           done = true;
           break;
@@ -77,24 +67,25 @@ router.post('/kling-txt2img', async (req, res) => {
           return res.status(500).json({ error: 'Kling API failed: ' + (pollRes.data.message || ''), raw: pollRes.data });
         }
       } catch (pollErr) {
-        // Kling poll endpoint is sometimes slow to respond if you poll too quickly after POST
         console.error(`[Kling][${task_id}] poll #${tries} error:`, pollErr.response?.data || pollErr.message);
       }
-      // Wait between polls
-      await new Promise(resolve => setTimeout(resolve, 4000)); // 4 seconds
-    }
-    if (!done) return res.status(504).json({ error: 'Timed out waiting for Kling image' });
 
-    // 6. Success
+      // Dynamic interval: Slow at first, then speed up
+      if (tries < 5) {
+        await new Promise(resolve => setTimeout(resolve, 3500)); // 3.5 sec for first 5 tries
+      } else if (tries < 10) {
+        await new Promise(resolve => setTimeout(resolve, 2000)); // 2 sec next 5 tries
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 1100)); // 1.1 sec for rest
+      }
+    }
+    if (!done) return res.status(504).json({ error: 'Timed out waiting for Kling image', task_id });
+
     return res.json({ imageUrl: result, status: 'succeeded', task_id });
 
   } catch (err) {
-    // Print the entire error object for deep debugging
-    try {
-      console.error('Kling API error:', JSON.stringify(err, null, 2));
-    } catch (e) {
-      console.error('Kling API error:', err);
-    }
+    try { console.error('Kling API error:', JSON.stringify(err, null, 2)); }
+    catch (e) { console.error('Kling API error:', err); }
     return res.status(500).json({ error: 'Internal error: ' + (err.message || ''), raw: err });
   }
 });
@@ -110,7 +101,6 @@ router.get('/kling-txt2img/:taskId', async (req, res) => {
       `${KLING_API_BASE}/images/generations/${taskId}`,
       { headers: { Authorization: `Bearer ${jwtToken}` } }
     );
-    // Return Kling raw result (so frontend can check status/images itself)
     return res.json(pollRes.data);
   } catch (err) {
     try { console.error('Kling polling error:', JSON.stringify(err, null, 2)); }
