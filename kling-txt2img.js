@@ -1,4 +1,6 @@
 // kling-txt2img.js
+require('dotenv').config(); // ✅ Load .env variables at the top
+
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
@@ -11,11 +13,18 @@ router.post('/kling-txt2img', async (req, res) => {
   console.log('=== Kling API request body:', req.body);
 
   try {
-    const { prompt, negative_prompt = '', resolution = '2k', n = 2, aspect_ratio = '16:9' } = req.body;
+    const {
+      prompt,
+      negative_prompt = '',
+      resolution = '2k',
+      n = 2,
+      aspect_ratio = '1:1'
+    } = req.body;
+
     if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
 
     const jwtToken = generateKlingJwt();
-    console.log('=== Generated JWT:', jwtToken.substring(0, 40) + '...');
+    console.log('=== Generated JWT:', jwtToken);
 
     const generationRes = await axios.post(
       `${KLING_API_BASE}/images/generations`,
@@ -42,14 +51,18 @@ router.post('/kling-txt2img', async (req, res) => {
     }
     console.log('=== Received task_id:', task_id);
 
-    // Initial wait before polling
-    await new Promise(resolve => setTimeout(resolve, 2500)); // 2.5 seconds
+    await new Promise(resolve => setTimeout(resolve, 2500));
 
-    // Dynamic Polling
     let tries = 0, maxTries = 40, result = [], done = false;
     while (tries < maxTries) {
       tries++;
-      const pollJwt = generateKlingJwt();
+      let pollJwt;
+      try {
+        pollJwt = generateKlingJwt();
+      } catch (jwtErr) {
+        console.error(`[Kling][${task_id}] JWT Error:`, jwtErr.message);
+        return res.status(500).json({ error: 'JWT generation error', raw: jwtErr });
+      }
       try {
         const pollRes = await axios.get(
           `${KLING_API_BASE}/images/generations/${task_id}`,
@@ -70,13 +83,12 @@ router.post('/kling-txt2img', async (req, res) => {
         console.error(`[Kling][${task_id}] poll #${tries} error:`, pollErr.response?.data || pollErr.message);
       }
 
-      // Dynamic interval: Slow at first, then speed up
       if (tries < 5) {
-        await new Promise(resolve => setTimeout(resolve, 3500)); // 3.5 sec for first 5 tries
+        await new Promise(resolve => setTimeout(resolve, 3500));
       } else if (tries < 10) {
-        await new Promise(resolve => setTimeout(resolve, 2000)); // 2 sec next 5 tries
+        await new Promise(resolve => setTimeout(resolve, 2000));
       } else {
-        await new Promise(resolve => setTimeout(resolve, 1100)); // 1.1 sec for rest
+        await new Promise(resolve => setTimeout(resolve, 1100));
       }
     }
     if (!done) return res.status(504).json({ error: 'Timed out waiting for Kling image', task_id });
@@ -90,7 +102,6 @@ router.post('/kling-txt2img', async (req, res) => {
   }
 });
 
-// --- GET: Poll by taskId (stateless, frontend polling) ---
 router.get('/kling-txt2img/:taskId', async (req, res) => {
   const { taskId } = req.params;
   if (!taskId) return res.status(400).json({ error: 'Missing taskId.' });
