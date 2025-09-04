@@ -2,6 +2,9 @@
 node_modules/
 # Env files
 .env
+.env.development
+.env.production
+
 # Service account / secret keys (manually upload to Render.com or Google Cloud only)
 *.json
 /etc/secrets/
