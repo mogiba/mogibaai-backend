@@ -3,8 +3,11 @@ const cors = require("cors");
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
-const axios = require("axios");
-const { generateKlingJwt } = require("./utils/klingJwt");
+
+// at the top of index.js (after require('dotenv').config())
+const kId = (process.env.RAZORPAY_KEY_ID || '').trim();
+const kSec = (process.env.RAZORPAY_KEY_SECRET || '').trim();
+console.log('🔑 RZP KEY_ID ..', kId.slice(-6), '| SECRET loaded:', !!kSec);
 
 // === GOOGLE SA KEY SETUP ===
 const saKeyPath = process.env.GOOGLE_APPLICATION_CREDENTIALS
@@ -32,14 +35,19 @@ process.env.GOOGLE_APPLICATION_CREDENTIALS = saKeyPath;
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
 
 // === ROUTES IMPORTS ===
-const vertexImageUltraRoute = require("./vertex-image-ultra-endpoint");
-const vertexImageFastRoute = require("./vertex-imagen4fast-generate-endpoint");
-const klingTxt2ImgRoute = require("./routes/klingRoutes");
-const razorpayRoute = require("./razorpay");
-const seedreamRoute = require("./routes/seedreamRoute"); // ✅ CommonJS import
+const webhookRoute = require("./routes/webhookRoute");
+const razorpayRoute = require("./routes/razorpayRoute");
+const textToImageRoutes = require("./routes/textToImageRoutes");
+const gptRoute = require("./routes/gptRoute");
+const creditRoutes = require("./routes/creditRoutes");
+
+// === WEBHOOK ROUTE (must be before express.json) ===
+app.use("/api/payments", webhookRoute);
+
+// === JSON body parser for other routes ===
+app.use(express.json({ limit: "20mb" }));
 
 // === ROOT + HEALTH ===
 app.get("/health", (req, res) => {
@@ -50,83 +58,10 @@ app.get("/", (req, res) => {
 });
 
 // === ROUTE MOUNTING ===
-app.use("/api", vertexImageUltraRoute);
-app.use("/api", vertexImageFastRoute);
-app.use("/api", klingTxt2ImgRoute);
 app.use("/api/payments", razorpayRoute);
-app.use("/api", seedreamRoute); // ✅ Mounted Seedream
-
-// === KLING EXTRA ROUTES FOR TASK CREATE + POLL ===
-const KLING_API_BASE = "https://api-singapore.klingai.com/v1";
-
-app.post("/api/kling-txt2img", async (req, res) => {
-  try {
-    const { prompt, resolution, n, aspect_ratio } = req.body;
-
-    const token = await generateKlingJwt();
-    if (!token) return res.status(500).json({ error: "Failed to fetch JWT token" });
-
-    const endpoint = `${KLING_API_BASE}/images/generations`;
-    const body = {
-      model_name: "kling-v2",
-      prompt,
-      negative_prompt: "",
-      resolution,
-      n,
-      aspect_ratio,
-    };
-
-    const response = await axios.post(endpoint, body, {
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    res.json({
-      ...response.data,
-      task_id: response.data?.data?.task_id,
-    });
-  } catch (error) {
-    console.error("❌ Error in create task:", error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data || error.message });
-  }
-});
-
-app.get("/api/kling-txt2img/:task_id", async (req, res) => {
-  try {
-    const { task_id } = req.params;
-    const token = await generateKlingJwt();
-    if (!token) return res.status(500).json({ error: "Failed to fetch JWT token" });
-
-    const endpoint = `${KLING_API_BASE}/images/generations/${task_id}`;
-    const response = await axios.get(endpoint, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (
-      response.data &&
-      response.data.data &&
-      response.data.data.task_status === "succeeded" &&
-      response.data.data.task_result &&
-      response.data.data.task_result.images
-    ) {
-      return res.json({
-        status: "succeeded",
-        images: response.data.data.task_result.images.map((img) => ({ url: img.url })),
-      });
-    } else {
-      return res.json({
-        status: response.data.data.task_status,
-      });
-    }
-  } catch (error) {
-    console.error("❌ Error in poll task:", error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data || error.message });
-  }
-});
+app.use("/api/text2img", textToImageRoutes);
+app.use("/api/gpt", gptRoute);
+app.use("/api/credits", creditRoutes); // ✅ Credits route mounted correctly
 
 // === START SERVER ===
 const PORT = process.env.PORT || 4000;

@@ -11,7 +11,7 @@ const keyPath = process.env.FIREBASE_KEY
 
 // File check
 if (!fs.existsSync(keyPath)) {
-  throw new Error("Firebase key file not found at " + keyPath);
+  throw new Error('Firebase key file not found at ' + keyPath);
 }
 
 const serviceAccount = require(keyPath);
@@ -32,9 +32,7 @@ async function saveToGallery(userId, imageUrl, prompt, base64Data) {
     const file = bucket.file(filename);
 
     await file.save(buffer, {
-      metadata: {
-        contentType: 'image/jpeg',
-      }
+      metadata: { contentType: 'image/jpeg' },
     });
 
     const [url] = await file.getSignedUrl({
@@ -42,12 +40,16 @@ async function saveToGallery(userId, imageUrl, prompt, base64Data) {
       expires: '03-01-2030',
     });
 
-    await db.collection('userGallery').doc(userId).collection('images').add({
-      imageUrl: url,
-      prompt,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      uid: userId, // <-- COMPULSORY!
-    });
+    await db
+      .collection('userGallery')
+      .doc(userId)
+      .collection('images')
+      .add({
+        imageUrl: url,
+        prompt,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        uid: userId,
+      });
 
     console.log('✅ Saved image to GCS + Firestore');
   } catch (error) {
@@ -55,4 +57,4 @@ async function saveToGallery(userId, imageUrl, prompt, base64Data) {
   }
 }
 
-module.exports = { saveToGallery };
+module.exports = { db, admin, saveToGallery };
