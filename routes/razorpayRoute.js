@@ -1,8 +1,11 @@
+// routes/razorpayRoute.js
+
 const express = require("express");
 const crypto = require("crypto");
 const Razorpay = require("razorpay");
 const { db } = require("../utils/firebaseUtils");
 const { addCredits } = require("../services/creditsService");
+const PLANS = require("../utils/plans"); // server-side plans mapping
 
 const router = express.Router();
 
@@ -31,30 +34,39 @@ function shortReceipt(uid) {
 /**
  * Create a Razorpay Order
  * POST /api/payments/razorpay/create-order
- * body: { credits: number, category: 'image'|'video', amountINR: number }
+ * body: { planId: string }
  */
 router.post("/razorpay/create-order", requireAuth, async (req, res) => {
   try {
-    const { credits, category, amountINR } = req.body || {};
-    if (!credits || !category || !amountINR) {
-      return res.status(400).json({ error: "MISSING_FIELDS" });
-    }
+    const { planId } = req.body || {};
+    if (!planId) return res.status(400).json({ error: "MISSING_PLANID" });
 
-    // Create order at Razorpay
+    // Lookup plan from server-side mapping (authoritative)
+    const plan = PLANS[planId];
+    if (!plan) return res.status(400).json({ error: "INVALID_PLAN" });
+
+    const amountINR = Number(plan.amountINR);
+    if (!amountINR || isNaN(amountINR)) return res.status(500).json({ error: "INVALID_PLAN_AMOUNT" });
+
+    // Create order at Razorpay (convert rupees -> paise)
+    const amountPaise = Math.round(amountINR * 100);
+
     const order = await rzp.orders.create({
-      amount: Math.round(Number(amountINR) * 100), // INR -> paise
+      amount: amountPaise, // paise
       currency: "INR",
       receipt: shortReceipt(req.uid),
-      notes: { uid: req.uid, credits: String(credits), category },
+      notes: { uid: req.uid, planId: plan.planId, credits: String(plan.credits), category: plan.category },
     });
 
     // Persist our order meta in Firestore (idempotent)
     await db.collection("razorpayOrders").doc(order.id).set({
       uid: req.uid,
       status: "created",
-      credits,
-      category,
-      amountINR: Number(amountINR),
+      planId: plan.planId,
+      credits: plan.credits,
+      category: plan.category,
+      amountINR: amountINR,
+      amountPaise: order.amount,
       currency: "INR",
       receipt: order.receipt,
       createdAt: new Date(),
@@ -84,8 +96,7 @@ router.post("/razorpay/create-order", requireAuth, async (req, res) => {
  */
 router.post("/razorpay/verify", requireAuth, async (req, res) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } =
-      req.body || {};
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       return res.status(400).json({ error: "MISSING_FIELDS" });
     }
@@ -99,7 +110,7 @@ router.post("/razorpay/verify", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "BAD_SIGNATURE" });
     }
 
-    // Mark as "paid" (idempotent), credits add here if you use verify callback
+    // Mark as "paid" (idempotent)
     const orderRef = db.collection("razorpayOrders").doc(razorpay_order_id);
     await db.runTransaction(async (t) => {
       const snap = await t.get(orderRef);
@@ -115,13 +126,14 @@ router.post("/razorpay/verify", requireAuth, async (req, res) => {
 
     // Add credits
     const orderSnap = await db.collection("razorpayOrders").doc(razorpay_order_id).get();
-    const { uid, credits, category } = orderSnap.data();
+    const { uid, credits, category, planId } = orderSnap.data();
     if (uid !== req.uid) return res.status(403).json({ error: "UID_MISMATCH" });
 
     await addCredits(uid, category, credits, {
       source: "checkout_verify",
       razorpayOrderId: razorpay_order_id,
       razorpayPaymentId: razorpay_payment_id,
+      planId,
     });
 
     res.json({ ok: true });
@@ -191,7 +203,7 @@ router.post("/razorpay/webhook", async (req, res) => {
       }
 
       let orderData = (await orderRef.get()).data() || {};
-      const { uid, credits, category } = orderData;
+      const { uid, credits, category, planId } = orderData;
 
       // Idempotent: do not double-credit
       await db.runTransaction(async (t) => {
