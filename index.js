@@ -1,15 +1,22 @@
+// index.js - final
+// Main server entry for Mogibaai backend
+// - supports Razorpay orders + webhook (raw body)
+// - picks up Google SA keys either from Render secret mount (/etc/secrets) or local ./secrets
+// - mounts routes
+
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 
-// --- Razorpay keys debug (optional) ---
+// --- Debug Razorpay keys (safe: only show tail of key) ---
 const kId = (process.env.RAZORPAY_KEY_ID || "").trim();
 const kSec = (process.env.RAZORPAY_KEY_SECRET || "").trim();
 console.log("🔑 RZP KEY_ID ..", kId ? kId.slice(-6) : "missing", "| SECRET loaded:", !!kSec);
 
-// --- Google SA key setup (Render secrets first, else local) ---
+// --- Google service-account / storage key resolution ---
+// Render.com exposes secret files at /etc/secrets/<filename> if you add them in dashboard.
 const RENDER_SA = "/etc/secrets/sa-key.json";
 const RENDER_STORAGE = "/etc/secrets/mogibaai-storage-key.json";
 
@@ -33,40 +40,42 @@ if (!fs.existsSync(storageKeyPath)) {
   console.log(`✅ Storage key found at ${storageKeyPath}`);
 }
 
+// Ensure environment variables point to resolved paths for libs that rely on them
 process.env.GOOGLE_APPLICATION_CREDENTIALS = saKeyPath;
 process.env.GOOGLE_STORAGE_KEY = storageKeyPath;
 
 const app = express();
+
+// === IMPORTANT: Razorpay webhooks must verify signature over raw body.
+// Register a raw body parser for the exact webhook path BEFORE express.json() so
+// the webhook handler receives the Buffer it needs for signature verification.
+app.use(
+  "/api/payments/razorpay/webhook",
+  express.raw({ type: "application/json" })
+);
+
+// JSON parser + CORS for all other endpoints
+app.use(express.json({ limit: "20mb" }));
 app.use(cors());
 
-// ⚠️ Razorpay webhook కి raw body కావాలి (signature verify కోసం).
-// ఈ మిడిల్‌వేర్ **express.json** కంటే ముందే ఉండాలి.
-app.use("/api/payments/razorpay/webhook", express.raw({ type: "application/json" }));
-
-// మిగతా అన్ని రూట్స్ కోసం JSON parser
-app.use(express.json({ limit: "20mb" }));
-
-// --- Routes ---
+// === Import routes (do this after middleware registration)
 const razorpayRoute = require("./routes/razorpayRoute");
 const textToImageRoutes = require("./routes/textToImageRoutes");
 const gptRoute = require("./routes/gptRoute");
 const creditRoutes = require("./routes/creditRoutes");
 
-// --- Health / Root ---
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", message: "Backend is live!" });
-});
-app.get("/", (_req, res) => {
-  res.send("Mogibaai backend is running!");
-});
+// === Health and root
+app.get("/health", (req, res) => res.json({ status: "ok", message: "Backend is live!" }));
+app.get("/", (req, res) => res.send("Mogibaai backend is running!"));
 
-// --- Mount routes ---
+// === Mount routes
+// razorpayRoute contains: /razorpay/create-order, /razorpay/verify, and /razorpay/webhook
 app.use("/api/payments", razorpayRoute);
 app.use("/api/text2img", textToImageRoutes);
 app.use("/api/gpt", gptRoute);
 app.use("/api/credits", creditRoutes);
 
-// --- Start server ---
+// === Start server ===
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`✅ Server started on http://localhost:${PORT}`);
