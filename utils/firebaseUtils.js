@@ -1,90 +1,109 @@
-// src/utils/firebaseUtils.js
+// src/utils/firebaseUtils.js (SECURE UPDATED)
+// Robust firebase-admin initialization + helpers
+// - Resolves service account key path from ENV or /etc/secrets or ./secrets
+// - Sets storage bucket from ENV (GCS_BUCKET_NAME) or <project_id>.appspot.com
+// - Provides short‑lived signed URL helper (TTL configurable)
+// - saveToGallery writes storagePath and a short‑lived imageUrl (with expiresAt)
+
 const admin = require('firebase-admin');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
-const bucket = require('../storage'); // GCS bucket instance (confirm path)
 
-// Resolve Firebase service account key path robustly
+// ---------- Resolve Firebase service account key path ----------
 function resolveFirebaseKeyPath() {
-  // Try common environment variables in order
   const envCandidates = [
-    process.env.FIREBASE_KEY,
+    process.env.FIREBASE_KEY, // can be a filename or absolute path
     process.env.GOOGLE_APPLICATION_CREDENTIALS,
   ].filter(Boolean);
 
-  // If any env var provided, try to resolve it
   for (const envVal of envCandidates) {
     try {
-      // If absolute path and exists
       if (path.isAbsolute(envVal) && fs.existsSync(envVal)) return envVal;
-
-      // If it's a filename or relative path, check Render default mount location
       const renderPath = path.join('/etc/secrets', envVal);
       if (fs.existsSync(renderPath)) return renderPath;
-
-      // Check relative to project root (useful for local dev)
       const relativePath = path.resolve(__dirname, '..', envVal);
       if (fs.existsSync(relativePath)) return relativePath;
-    } catch (err) {
+    } catch (_) {
       // ignore and continue
     }
   }
 
-  // Fallback: check ../secrets/sa-key.json (local fallback)
   const fallback = path.join(__dirname, '..', 'secrets', 'sa-key.json');
   if (fs.existsSync(fallback)) return fallback;
-
   return null;
 }
 
 const keyPath = resolveFirebaseKeyPath();
-
 if (!keyPath) {
   throw new Error(
-    'Firebase key file not found. Tried FIREBASE_KEY, GOOGLE_APPLICATION_CREDENTIALS, /etc/secrets/<file>, and ../secrets/sa-key.json'
+    'Firebase key file not found. Set FIREBASE_KEY or GOOGLE_APPLICATION_CREDENTIALS or place sa-key.json in ./secrets'
   );
 }
 
-console.log('Using Firebase key from:', keyPath);
-
-// Load service account JSON (try require first, otherwise read file)
+// ---------- Load service account JSON ----------
 let serviceAccount;
 try {
+  // allow require() when path is resolvable
+  // eslint-disable-next-line import/no-dynamic-require, global-require
   serviceAccount = require(keyPath);
 } catch (err) {
   try {
     const raw = fs.readFileSync(keyPath, 'utf8');
     serviceAccount = JSON.parse(raw);
   } catch (err2) {
-    throw new Error('Failed to load Firebase service account JSON: ' + err2.message);
+    throw new Error('Failed to load Firebase service account JSON: ' + (err2.message || err2));
   }
 }
 
-// Initialize admin if not already
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    storageBucket: process.env.GCS_BUCKET_NAME || 'mogibaai-b3500.appspot.com',
-  });
+// ---------- Determine storage bucket ----------
+const inferredBucket = serviceAccount?.project_id ? `${serviceAccount.project_id}.appspot.com` : null;
+const storageBucketName = process.env.GCS_BUCKET_NAME || inferredBucket || undefined;
+if (!storageBucketName) {
+  throw new Error('Storage bucket not configured. Set GCS_BUCKET_NAME or check serviceAccount.project_id');
+}
+
+// ---------- Initialize admin SDK (idempotent) ----------
+if (!admin.apps || admin.apps.length === 0) {
+  const initOpts = { credential: admin.credential.cert(serviceAccount) };
+  if (storageBucketName) initOpts.storageBucket = storageBucketName;
+  admin.initializeApp(initOpts);
 }
 
 const db = admin.firestore();
+const bucket = admin.storage().bucket();
 
+// ---------- Signed URL helper (short‑lived) ----------
+// TTL in hours via ENV SIGNED_URL_TTL_HOURS (default 24h)
+function getSignedUrlTTLms() {
+  const h = Number(process.env.SIGNED_URL_TTL_HOURS || 24);
+  return (Number.isFinite(h) && h > 0 ? h : 24) * 60 * 60 * 1000;
+}
+
+async function getSignedUrlForPath(storagePath, opts = {}) {
+  if (!storagePath) throw new Error('storagePath required');
+  const ttlMs = Number.isFinite(Number(opts.ttlMs)) ? Number(opts.ttlMs) : getSignedUrlTTLms();
+  const file = bucket.file(storagePath);
+  const [url] = await file.getSignedUrl({ action: 'read', expires: Date.now() + ttlMs });
+  return { url, expiresAt: new Date(Date.now() + ttlMs).toISOString() };
+}
+
+// ---------- Helper: upload base64 image into user's gallery ----------
 async function saveToGallery(userId, imageUrl, prompt, base64Data) {
   try {
+    if (!userId) throw new Error('Missing userId');
+    if (!base64Data) throw new Error('Missing base64 data');
+
     const buffer = Buffer.from(base64Data, 'base64');
     const filename = `images/${userId}/${uuidv4()}.jpg`;
     const file = bucket.file(filename);
 
     await file.save(buffer, {
       metadata: { contentType: 'image/jpeg' },
+      resumable: false,
     });
 
-    const [url] = await file.getSignedUrl({
-      action: 'read',
-      expires: '03-01-2030',
-    });
+    const { url, expiresAt } = await getSignedUrlForPath(filename);
 
     await db
       .collection('userGallery')
@@ -92,15 +111,18 @@ async function saveToGallery(userId, imageUrl, prompt, base64Data) {
       .collection('images')
       .add({
         imageUrl: url,
+        imageUrlExpiresAt: expiresAt,
         prompt,
+        storagePath: filename,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         uid: userId,
       });
 
-    console.log('✅ Saved image to GCS + Firestore');
+    return { ok: true, url, storagePath: filename, expiresAt };
   } catch (error) {
-    console.error('❌ saveToGallery Error:', error);
+    console.error('saveToGallery Error:', error);
+    return { ok: false, error: error.message || String(error) };
   }
 }
 
-module.exports = { db, admin, saveToGallery };
+module.exports = { admin, db, bucket, saveToGallery, getSignedUrlForPath };

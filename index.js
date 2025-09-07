@@ -1,4 +1,4 @@
-// index.js - final
+// index.js - final (UPDATED)
 // Main server entry for Mogibaai backend
 // - supports Razorpay orders + webhook (raw body)
 // - picks up Google SA keys either from Render secret mount (/etc/secrets) or local ./secrets
@@ -63,6 +63,15 @@ const razorpayRoute = require("./routes/razorpayRoute");
 const textToImageRoutes = require("./routes/textToImageRoutes");
 const gptRoute = require("./routes/gptRoute");
 const creditRoutes = require("./routes/creditRoutes");
+const userRoute = require('./routes/userRoute'); // <-- mounted user routes
+const adminRoute = require('./routes/adminRoute'); // <-- ADD THIS
+
+// Optional: debug that route file was loaded
+try {
+  console.log('userRoute module loaded');
+} catch (err) {
+  // ignore
+}
 
 // === Health and root
 app.get("/health", (req, res) => res.json({ status: "ok", message: "Backend is live!" }));
@@ -74,6 +83,8 @@ app.use("/api/payments", razorpayRoute);
 app.use("/api/text2img", textToImageRoutes);
 app.use("/api/gpt", gptRoute);
 app.use("/api/credits", creditRoutes);
+app.use('/api/user', userRoute); // <-- ensure user routes are mounted
+app.use('/api/admin', adminRoute); // <-- ADD THIS
 
 // === Start server ===
 const PORT = process.env.PORT || 4000;
