@@ -17,7 +17,7 @@ const rzp = new Razorpay({
 
 // ---- tiny auth (x-uid header) ----
 function requireAuth(req, res, next) {
-  const uid = req.headers["x-uid"];
+  const uid = req.headers["x-uid"] || req.headers["X-Uid"] || "";
   if (!uid) return res.status(401).json({ error: "UNAUTH" });
   req.uid = uid;
   next();

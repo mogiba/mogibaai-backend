@@ -1,54 +1,36 @@
-// utils/deleteUtils.js (SECURE UPDATED)
-/**
- * deleteUtils.js
- *
- * Workflow implemented (private-by-default strategy):
- * - requestUserMediaDeletion(uid) -> marks user's media docs as `pending_deletion`, makes objects PRIVATE,
- *   stores requestedAt/requestedBy, and creates audit entry.
- * - approveUserMediaDeletion(uid, opts) -> PERMANENTLY deletes storage objects + firestore docs (admin action). opts: { fileIds: [] }
- * - rejectUserMediaDeletion(uid, opts) -> clears pending flags and sets docs back to `active` WITHOUT making objects public.
- *   (App should serve media via short‑lived signed URLs instead of public ACLs.)
- * - autoDeletePending(cutoffDays = 60) -> finds pending_deletion older than cutoff and permanently deletes them.
- * - getPendingDeletionItems(uid) -> list pending items for a user.
- *
- * IMPORTANT:
- * - Only touches user-scoped media (userGallery/{uid}/images, userVideos/{uid}/videos, avatars/{uid}).
- * - Payment / billing / user doc not deleted here.
- */
+// utils/deleteUtils.js (SAFE, lazy bucket)
+// Private-by-default media deletion workflow.
+// Uses utils/firebaseUtils.getBucket() so server won't crash at require-time.
 
-const { db, admin } = require('./firebaseUtils');
+'use strict';
+
+const { db, getBucket } = require('./firebaseUtils');
 const BATCH_MAX = 500;
-const DEFAULT_BUCKET = admin.storage().bucket();
 
 function nowISO() {
   return new Date().toISOString();
 }
 
-/**
- * Helper: list documents under a subcollection (returns array of docSnaps)
- * path example: db.collection('userGallery').doc(uid).collection('images')
- */
+/** Firestore subcollection list helper */
 async function listSubcollectionDocs(parentColl, parentDocId, subcollection) {
   const ref = db.collection(parentColl).doc(parentDocId).collection(subcollection);
-  const docs = await ref.get();
-  return docs.docs || [];
+  const snap = await ref.get();
+  return snap.docs || [];
 }
 
 /**
- * Mark user's media docs as pending_deletion and revoke public access to corresponding storage objects.
- * - uid: user id
- * - opts: { fileCollections: [{ parentCollection, subcollection }] } optional to target other paths
+ * Step 1: Mark user's media docs as pending_deletion and make storage objects private.
+ * opts.fileCollections?: [{ parentCollection, subcollection }]
  */
 async function requestUserMediaDeletion(uid, opts = {}) {
   if (!uid) throw new Error('uid required');
 
+  const bucket = getBucket(); // lazy: throws a clear error if bucket not configured
   const filesTouched = [];
-  const bucket = DEFAULT_BUCKET;
 
-  // default collections we consider user media in
   const targets = opts.fileCollections || [
     { parentCollection: 'userGallery', subcollection: 'images' },
-    { parentCollection: 'userVideos', subcollection: 'videos' },
+    { parentCollection: 'userVideos',  subcollection: 'videos' },
   ];
 
   const requestedAt = new Date();
@@ -58,17 +40,14 @@ async function requestUserMediaDeletion(uid, opts = {}) {
 
     for (const dsnap of docs) {
       const data = dsnap.data() || {};
-      // Only affect docs owned by uid
       const owner = data.uid || data.ownerUid || uid;
       if (String(owner) !== String(uid)) continue;
 
-      // skip if already pending or deleted
       if (data.status === 'pending_deletion' || data.status === 'deleted') continue;
 
-      // expected to have storagePath (e.g., images/<uid>/filename.jpg) in doc
       const storagePath = data.storagePath || data.path || data.filePath;
+
       if (!storagePath) {
-        // mark pending anyway (no storage path)
         await dsnap.ref.update({
           status: 'pending_deletion',
           requestedAt,
@@ -78,23 +57,19 @@ async function requestUserMediaDeletion(uid, opts = {}) {
         continue;
       }
 
-      // revoke public access: attempt to find file and make it private, add metadata
       const file = bucket.file(storagePath);
       try {
-        // add metadata flag
-        try {
-          await file.setMetadata({ metadata: { pendingDeletion: 'true', pendingRequestedAt: requestedAt.toISOString() } });
-        } catch (_) {}
+        // add metadata flag (best-effort)
+        await file.setMetadata({
+          metadata: {
+            pendingDeletion: 'true',
+            pendingRequestedAt: requestedAt.toISOString(),
+          },
+        }).catch(() => {});
 
-        // make private to ensure public cannot access; if object not exist, catch and continue
-        try {
-          await file.makePrivate();
-        } catch (e) {
-          // Some objects may already be private or error; log and continue
-          console.warn('requestUserMediaDeletion: makePrivate failed for', storagePath, e.message || e);
-        }
+        // ensure object is private (best-effort)
+        await file.makePrivate().catch(() => {});
 
-        // update firestore doc
         await dsnap.ref.update({
           status: 'pending_deletion',
           requestedAt,
@@ -104,12 +79,12 @@ async function requestUserMediaDeletion(uid, opts = {}) {
 
         filesTouched.push({ docId: dsnap.id, storagePath });
       } catch (err) {
-        console.error('requestUserMediaDeletion: error processing', storagePath, err.message || err);
+        console.warn('requestUserMediaDeletion:', storagePath, err.message || err);
       }
     }
   }
 
-  // audit log
+  // audit
   try {
     await db.collection('deletionRequests').add({
       uid,
@@ -126,80 +101,75 @@ async function requestUserMediaDeletion(uid, opts = {}) {
 }
 
 /**
- * Permanently delete storage objects and remove their firestore docs.
- * adminActionBy: admin uid or system actor,
- * opts: { fileIds: [] } - if provided, restrict to those doc ids; else operate on all pending_deletion for the uid.
+ * Step 2: Permanently delete (ADMIN).
+ * opts.fileIds?: restrict to those doc IDs.
  */
 async function approveUserMediaDeletion(uid, adminActionBy = 'system', opts = {}) {
   if (!uid) throw new Error('uid required');
-  const bucket = DEFAULT_BUCKET;
+
+  const bucket = getBucket();
   const fileIds = Array.isArray(opts.fileIds) && opts.fileIds.length ? opts.fileIds : null;
   const approvedAt = new Date();
 
-  // gather docs to delete
   const rowsToDelete = [];
 
-  // userGallery images
+  // userGallery
   {
     const ref = db.collection('userGallery').doc(uid).collection('images');
     const q = ref.where('status', '==', 'pending_deletion');
-    const docs = await q.get();
-    docs.forEach((d) => {
+    const snap = await q.get();
+    snap.forEach((d) => {
       if (fileIds && !fileIds.includes(d.id)) return;
       rowsToDelete.push({ ref: d.ref, data: d.data() });
     });
   }
 
-  // userVideos videos
+  // userVideos
   {
     const ref = db.collection('userVideos').doc(uid).collection('videos');
     const q = ref.where('status', '==', 'pending_deletion');
-    const docs = await q.get();
-    docs.forEach((d) => {
+    const snap = await q.get();
+    snap.forEach((d) => {
       if (fileIds && !fileIds.includes(d.id)) return;
       rowsToDelete.push({ ref: d.ref, data: d.data() });
     });
   }
 
-  // avatars: if you kept avatar file old under avatars/{uid}
-  // We do not delete user doc here, only avatar object if pending flagged
+  // optional avatar cleanup (flagged on users doc)
   try {
-    const userDocSnap = await db.collection('users').doc(uid).get();
-    const udata = userDocSnap.exists ? userDocSnap.data() : null;
-    if (udata && udata.avatarPendingDeletion) {
-      // push a pseudo doc
-      rowsToDelete.push({ ref: db.collection('users').doc(uid), data: { storagePath: udata.avatarPath || null, avatar: true } });
+    const uSnap = await db.collection('users').doc(uid).get();
+    const u = uSnap.exists ? uSnap.data() : null;
+    if (u && u.avatarPendingDeletion) {
+      rowsToDelete.push({
+        ref: db.collection('users').doc(uid),
+        data: { storagePath: u.avatarPath || null, avatar: true },
+      });
     }
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
 
-  // delete storage files and firestore docs (batched)
   const deletionResults = [];
   for (const row of rowsToDelete) {
-    const data = row.data || {};
-    const storagePath = data.storagePath || data.filePath || data.path || (data.avatar ? data.avatarPath || null : null);
+    const d = row.data || {};
+    const storagePath =
+      d.storagePath || d.filePath || d.path || (d.avatar ? d.avatarPath || null : null);
 
     if (storagePath) {
-      const file = bucket.file(storagePath);
       try {
-        await file.delete();
+        await bucket.file(storagePath).delete();
         deletionResults.push({ storagePath, deleted: true });
       } catch (err) {
-        console.warn('approveUserMediaDeletion: failed to delete storage file', storagePath, err.message || err);
         deletionResults.push({ storagePath, deleted: false, error: err.message || err });
       }
     }
 
-    // delete the firestore doc
     try {
       await row.ref.delete();
     } catch (err) {
-      console.warn('approveUserMediaDeletion: failed to delete doc', row.ref.path, err.message || err);
+      console.warn('approveUserMediaDeletion: delete doc failed', row.ref.path, err.message || err);
     }
   }
 
-  // write audit record
+  // audit
   try {
     await db.collection('deletionApprovals').add({
       uid,
@@ -217,17 +187,13 @@ async function approveUserMediaDeletion(uid, adminActionBy = 'system', opts = {}
 }
 
 /**
- * Reject a pending deletion request: restore access and set status back to 'active'
- * adminActionBy: admin uid
- * opts: { fileIds: [] } optional
- *
- * SECURITY NOTE:
- *  - We DO NOT call makePublic(); objects remain private.
- *  - App should fetch short‑lived signed URLs when it needs to display media.
+ * Step 3: Reject deletion (ADMIN) – set status back to 'active'.
+ * Objects remain PRIVATE (no makePublic).
  */
 async function rejectUserMediaDeletion(uid, adminActionBy = 'system', opts = {}) {
   if (!uid) throw new Error('uid required');
-  const bucket = DEFAULT_BUCKET;
+
+  const bucket = getBucket();
   const fileIds = Array.isArray(opts.fileIds) && opts.fileIds.length ? opts.fileIds : null;
   const rejectedAt = new Date();
 
@@ -237,8 +203,8 @@ async function rejectUserMediaDeletion(uid, adminActionBy = 'system', opts = {})
   {
     const ref = db.collection('userGallery').doc(uid).collection('images');
     const q = ref.where('status', '==', 'pending_deletion');
-    const docs = await q.get();
-    docs.forEach((d) => {
+    const snap = await q.get();
+    snap.forEach((d) => {
       if (fileIds && !fileIds.includes(d.id)) return;
       rowsToRestore.push({ ref: d.ref, data: d.data() });
     });
@@ -248,8 +214,8 @@ async function rejectUserMediaDeletion(uid, adminActionBy = 'system', opts = {})
   {
     const ref = db.collection('userVideos').doc(uid).collection('videos');
     const q = ref.where('status', '==', 'pending_deletion');
-    const docs = await q.get();
-    docs.forEach((d) => {
+    const snap = await q.get();
+    snap.forEach((d) => {
       if (fileIds && !fileIds.includes(d.id)) return;
       rowsToRestore.push({ ref: d.ref, data: d.data() });
     });
@@ -259,18 +225,19 @@ async function rejectUserMediaDeletion(uid, adminActionBy = 'system', opts = {})
   for (const row of rowsToRestore) {
     const data = row.data || {};
     const storagePath = data.storagePath || data.filePath || data.path;
+
     if (storagePath) {
-      const file = bucket.file(storagePath);
       try {
-        // clear metadata flag; keep object PRIVATE — do NOT makePublic
-        await file.setMetadata({ metadata: { pendingDeletion: 'false' } }).catch(() => {});
+        await bucket.file(storagePath).setMetadata({
+          metadata: { pendingDeletion: 'false' },
+        }).catch(() => {});
+        // keep private
         restoreResults.push({ storagePath, restored: true });
       } catch (err) {
         restoreResults.push({ storagePath, restored: false, error: err.message || err });
       }
     }
 
-    // set status back to active
     try {
       await row.ref.update({
         status: 'active',
@@ -278,11 +245,10 @@ async function rejectUserMediaDeletion(uid, adminActionBy = 'system', opts = {})
         rejectedBy: adminActionBy,
       });
     } catch (err) {
-      console.warn('rejectUserMediaDeletion: failed update doc', row.ref.path, err.message || err);
+      console.warn('rejectUserMediaDeletion: update failed', row.ref.path, err.message || err);
     }
   }
 
-  // audit log
   try {
     await db.collection('deletionApprovals').add({
       uid,
@@ -300,25 +266,20 @@ async function rejectUserMediaDeletion(uid, adminActionBy = 'system', opts = {})
 }
 
 /**
- * Auto-delete pending items older than cutoffDays (default 60)
- * Scans userGallery and userVideos for status == 'pending_deletion' and requestedAt <= cutoff date.
- * This runs as a scheduled job.
+ * Cron: auto delete pending items older than cutoffDays (default 60).
  */
 async function autoDeletePending(cutoffDays = 60) {
   const cutoff = new Date(Date.now() - cutoffDays * 24 * 60 * 60 * 1000);
-
-  const bucket = DEFAULT_BUCKET;
+  const bucket = getBucket();
   const deletionSummary = [];
 
-  // Helper: process a query snapshot
   async function processSnapshot(snapshot) {
-    if (snapshot.empty) return;
+    if (!snapshot || snapshot.empty) return;
     for (const doc of snapshot.docs) {
       try {
-        const d = doc.data();
-        if (!d.requestedAt) continue;
-        const requestedAt = d.requestedAt.toDate ? d.requestedAt.toDate() : new Date(d.requestedAt);
-        if (requestedAt > cutoff) continue;
+        const d = doc.data() || {};
+        const reqAt = d.requestedAt?.toDate ? d.requestedAt.toDate() : (d.requestedAt ? new Date(d.requestedAt) : null);
+        if (!reqAt || reqAt > cutoff) continue;
 
         const storagePath = d.storagePath || d.filePath || d.path;
         if (storagePath) {
@@ -330,43 +291,33 @@ async function autoDeletePending(cutoffDays = 60) {
           }
         }
 
-        // delete the document
-        try {
-          await doc.ref.delete();
-        } catch (err) {
-          console.warn('autoDeletePending: failed to delete doc', doc.ref.path, err.message || err);
-        }
+        await doc.ref.delete().catch(() => {});
       } catch (e) {
-        console.warn('autoDeletePending: item processing failed', e.message || e);
+        console.warn('autoDeletePending: processing failed', e.message || e);
       }
     }
   }
 
-  // Query all pending_deletion images across users (two collections)
-  // Firestore doesn't support cross-collection query across different subcollections; iterate per-user parents.
   // userGallery/*/images
-  const usersSnapshot = await db.collection('userGallery').listDocuments();
-  for (const userDocRef of usersSnapshot) {
-    const imagesRef = userDocRef
-      .collection('images')
+  const galleryUsers = await db.collection('userGallery').listDocuments();
+  for (const userRef of galleryUsers) {
+    const q = userRef.collection('images')
       .where('status', '==', 'pending_deletion')
       .where('requestedAt', '<=', cutoff);
-    const snap = await imagesRef.get();
+    const snap = await q.get();
     await processSnapshot(snap);
   }
 
-  // userVideos
-  const usersVideosDocs = await db.collection('userVideos').listDocuments();
-  for (const userDocRef of usersVideosDocs) {
-    const vidsRef = userDocRef
-      .collection('videos')
+  // userVideos/*/videos
+  const videoUsers = await db.collection('userVideos').listDocuments();
+  for (const userRef of videoUsers) {
+    const q = userRef.collection('videos')
       .where('status', '==', 'pending_deletion')
       .where('requestedAt', '<=', cutoff);
-    const snap = await vidsRef.get();
+    const snap = await q.get();
     await processSnapshot(snap);
   }
 
-  // record audit
   try {
     await db.collection('deletionApprovals').add({
       action: 'auto_purge',
@@ -382,21 +333,19 @@ async function autoDeletePending(cutoffDays = 60) {
   return { ok: true, deletedCount: deletionSummary.length, details: deletionSummary };
 }
 
-/**
- * Get pending deletion items for a user (for admin review UI)
- */
+/** Admin UI helper: list pending items for a user */
 async function getPendingDeletionItems(uid) {
   if (!uid) throw new Error('uid required');
 
   const items = [];
 
-  const galleryRef = db.collection('userGallery').doc(uid).collection('images');
-  const imagesSnap = await galleryRef.where('status', '==', 'pending_deletion').get();
-  imagesSnap.forEach((d) => items.push({ docId: d.id, collection: galleryRef.path, data: d.data() }));
+  const gRef = db.collection('userGallery').doc(uid).collection('images');
+  const gSnap = await gRef.where('status', '==', 'pending_deletion').get();
+  gSnap.forEach((d) => items.push({ docId: d.id, collection: gRef.path, data: d.data() }));
 
-  const videosRef = db.collection('userVideos').doc(uid).collection('videos');
-  const videosSnap = await videosRef.where('status', '==', 'pending_deletion').get();
-  videosSnap.forEach((d) => items.push({ docId: d.id, collection: videosRef.path, data: d.data() }));
+  const vRef = db.collection('userVideos').doc(uid).collection('videos');
+  const vSnap = await vRef.where('status', '==', 'pending_deletion').get();
+  vSnap.forEach((d) => items.push({ docId: d.id, collection: vRef.path, data: d.data() }));
 
   return items;
 }

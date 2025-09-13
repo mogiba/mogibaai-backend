@@ -1,95 +1,110 @@
-// index.js - final (UPDATED)
-// Main server entry for Mogibaai backend
-// - supports Razorpay orders + webhook (raw body)
-// - picks up Google SA keys either from Render secret mount (/etc/secrets) or local ./secrets
-// - mounts routes
+// index.js – stable (webhook-first, storage bucket auto-resolve, routes wired)
 
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 
-// --- Debug Razorpay keys (safe: only show tail of key) ---
-const kId = (process.env.RAZORPAY_KEY_ID || "").trim();
-const kSec = (process.env.RAZORPAY_KEY_SECRET || "").trim();
-console.log("🔑 RZP KEY_ID ..", kId ? kId.slice(-6) : "missing", "| SECRET loaded:", !!kSec);
+// --- Razorpay debug (safe) ---
+const kId = (process.env.RAZORPAY_KEY_ID || '').trim();
+const kSec = (process.env.RAZORPAY_KEY_SECRET || '').trim();
+console.log('🔑 RZP KEY_ID ..', kId ? kId.slice(-6) : 'missing', '| SECRET loaded:', !!kSec);
 
-// --- Google service-account / storage key resolution ---
-// Render.com exposes secret files at /etc/secrets/<filename> if you add them in dashboard.
-const RENDER_SA = "/etc/secrets/sa-key.json";
-const RENDER_STORAGE = "/etc/secrets/mogibaai-storage-key.json";
-
-const localSa = path.join(__dirname, "secrets", "sa-key.json");
-const localStorage = path.join(__dirname, "secrets", "mogibaai-storage-key.json");
-
-const saKeyPath = fs.existsSync(RENDER_SA) ? RENDER_SA : localSa;
-const storageKeyPath = fs.existsSync(RENDER_STORAGE) ? RENDER_STORAGE : localStorage;
+// --- Resolve Google SA key (REQUIRED) ---
+const CANDIDATE_SA_ETC = '/etc/secrets/sa-key.json';
+const LOCAL_SA = path.join(__dirname, 'secrets', 'sa-key.json');
+const saKeyPath = fs.existsSync(CANDIDATE_SA_ETC) ? CANDIDATE_SA_ETC : LOCAL_SA;
 
 if (!fs.existsSync(saKeyPath)) {
-  console.error("❌ Google Service Account key file NOT found at", saKeyPath);
-  throw new Error("Google Service Account key file not found");
-} else {
-  console.log(`✅ SA key found at ${saKeyPath}`);
+  console.error('❌ Google Service Account key file NOT found at', saKeyPath);
+  throw new Error('Google Service Account key file not found');
 }
-
-if (!fs.existsSync(storageKeyPath)) {
-  console.error("❌ Google Storage key file NOT found at", storageKeyPath);
-  throw new Error("Google Storage key file not found");
-} else {
-  console.log(`✅ Storage key found at ${storageKeyPath}`);
-}
-
-// Ensure environment variables point to resolved paths for libs that rely on them
+console.log(`✅ SA key found at ${saKeyPath}`);
 process.env.GOOGLE_APPLICATION_CREDENTIALS = saKeyPath;
-process.env.GOOGLE_STORAGE_KEY = storageKeyPath;
+
+// --- Resolve Storage key (OPTIONAL) ---
+const CANDIDATE_STORAGE_ETC = '/etc/secrets/mogibaa-storage-key.json';
+const LOCAL_STORAGE = path.join(__dirname, 'secrets', 'mogibaa-storage-key.json');
+
+let storageKeyPath = '';
+if (fs.existsSync(CANDIDATE_STORAGE_ETC)) storageKeyPath = CANDIDATE_STORAGE_ETC;
+else if (fs.existsSync(LOCAL_STORAGE)) storageKeyPath = LOCAL_STORAGE;
+
+if (storageKeyPath) {
+  console.log(`✅ Storage key found at ${storageKeyPath}`);
+  process.env.GOOGLE_STORAGE_KEY = storageKeyPath;
+} else {
+  console.warn('⚠️  Storage key file NOT found (OK). Will infer bucket from env or service account.');
+}
+
+// --- Ensure FIREBASE_STORAGE_BUCKET env ---
+(function ensureBucketEnv() {
+  if (!process.env.FIREBASE_STORAGE_BUCKET) {
+    if (process.env.REACT_APP_FIREBASE_STORAGE_BUCKET) {
+      process.env.FIREBASE_STORAGE_BUCKET = process.env.REACT_APP_FIREBASE_STORAGE_BUCKET;
+    } else if (storageKeyPath) {
+      try {
+        const j = JSON.parse(fs.readFileSync(storageKeyPath, 'utf8'));
+        const b = j.bucket || j.bucket_name || j.storageBucket;
+        if (b) process.env.FIREBASE_STORAGE_BUCKET = b;
+      } catch {}
+    }
+  }
+  if (!process.env.FIREBASE_STORAGE_BUCKET) {
+    try {
+      const sa = JSON.parse(fs.readFileSync(saKeyPath, 'utf8'));
+      if (sa.project_id) process.env.FIREBASE_STORAGE_BUCKET = `${sa.project_id}.appspot.com`;
+    } catch {}
+  }
+  if (process.env.FIREBASE_STORAGE_BUCKET) {
+    console.log('🪣 Storage bucket =', process.env.FIREBASE_STORAGE_BUCKET);
+  } else {
+    console.warn('⚠️  FIREBASE_STORAGE_BUCKET not resolved yet; utils/firebaseUtils handles this gracefully.');
+  }
+})();
+
+// --- Early bootstrap firebase-admin via our helper ---
+require('./utils/firebaseUtils');
 
 const app = express();
 
-// === IMPORTANT: Razorpay webhooks must verify signature over raw body.
-// Register a raw body parser for the exact webhook path BEFORE express.json() so
-// the webhook handler receives the Buffer it needs for signature verification.
-app.use(
-  "/api/payments/razorpay/webhook",
-  express.raw({ type: "application/json" })
-);
+/* === CRITICAL: Razorpay webhook must get RAW body BEFORE json parser === */
+app.use('/api/payments/razorpay/webhook', express.raw({ type: 'application/json' }));
 
-// JSON parser + CORS for all other endpoints
-app.use(express.json({ limit: "20mb" }));
+// Global middleware for the rest
+app.use(express.json({ limit: '20mb' }));
 app.use(cors());
 
-// === Import routes (do this after middleware registration)
-const razorpayRoute = require("./routes/razorpayRoute");
-const textToImageRoutes = require("./routes/textToImageRoutes");
-const gptRoute = require("./routes/gptRoute");
-const creditRoutes = require("./routes/creditRoutes");
-const userRoute = require('./routes/userRoute'); // <-- mounted user routes
-const adminRoute = require('./routes/adminRoute'); // <-- ADD THIS
+// === Routes ===
+const plansRoute = require('./routes/plansRoute');
+const creditsRoute = require('./routes/creditsRoute');
+const paymentsRoute = require('./routes/paymentsRoute'); // /api/payments/razorpay
 
-// Optional: debug that route file was loaded
-try {
-  console.log('userRoute module loaded');
-} catch (err) {
-  // ignore
-}
+// Keep other existing routes
+const textToImageRoutes = require('./routes/textToImageRoutes');
+const gptRoute = require('./routes/gptRoute');
+const userRoute = require('./routes/userRoute');
+const adminRoute = require('./routes/adminRoute');
 
-// === Health and root
-app.get("/health", (req, res) => res.json({ status: "ok", message: "Backend is live!" }));
-app.get("/", (req, res) => res.send("Mogibaai backend is running!"));
+// Health
+app.get('/health', (req, res) => res.json({ status: 'ok', message: 'Backend is live!' }));
+app.get('/', (req, res) => res.send('Mogibaa backend is running!'));
 
-// === Mount routes
-// razorpayRoute contains: /razorpay/create-order, /razorpay/verify, and /razorpay/webhook
-app.use("/api/payments", razorpayRoute);
-app.use("/api/text2img", textToImageRoutes);
-app.use("/api/gpt", gptRoute);
-app.use("/api/credits", creditRoutes);
-app.use('/api/user', userRoute); // <-- ensure user routes are mounted
-app.use('/api/admin', adminRoute); // <-- ADD THIS
+// Mount
+app.use('/api/plans', plansRoute);
+app.use('/api/credits', creditsRoute);
+app.use('/api/payments/razorpay', paymentsRoute);
 
-// === Start server ===
+app.use('/api/text2img', textToImageRoutes);
+app.use('/api/gpt', gptRoute);
+app.use('/api/user', userRoute);
+app.use('/api/admin', adminRoute);
+
+// Start
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`✅ Server started on http://localhost:${PORT}`);
   console.log(`Using SA Key path: ${saKeyPath}`);
-  console.log(`Using Storage Key path: ${storageKeyPath}`);
+  if (storageKeyPath) console.log(`Using Storage Key path: ${storageKeyPath}`);
 });
