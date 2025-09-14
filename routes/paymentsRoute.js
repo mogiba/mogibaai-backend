@@ -5,6 +5,9 @@
 const express = require("express");
 const rzpSvc = require("../services/razorpayService");
 const creditsService = require("../services/creditsService");
+const { db } = require('../utils/firebaseUtils');
+const requireAuth = require('../middlewares/requireAuth');
+const { getAuthoritativePlanById, getTopupPlanById, getSubscriptionPlanById } = require('../utils/plans');
 
 // optional plans map
 let PLANS = null;
@@ -39,12 +42,33 @@ router.get('/debug/headers', async (req, res) => {
 
 /* --------------- helpers --------------- */
 const noStore = (res) => res.set("Cache-Control", "no-store");
-const readUid = (req) => {
-  const h = (req.headers["x-uid"] || req.headers["X-Uid"] || "").toString().trim();
-  const q = (req.query.uid || "").toString().trim();
-  const b = req.body && req.body.uid ? String(req.body.uid).trim() : "";
-  return h || q || b || "";
-};
+const DEBUG = Boolean(process.env.DEBUG_RAZORPAY === '1' || process.env.DEBUG === '1');
+
+async function readUid(req) {
+  // 1) Authorization: Bearer <token> OR X-Forwarded-Authorization
+  const authHeader = (req.headers['authorization'] || req.headers['x-forwarded-authorization'] || '').toString();
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    const token = authHeader.split(' ')[1];
+    try {
+      const admin = require('../utils/firebaseUtils').admin || require('firebase-admin');
+      const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+      if (decoded && decoded.uid) {
+        if (DEBUG) console.log('[DEBUG_RAZORPAY] verified token for uid=', decoded.uid);
+        return decoded.uid;
+      }
+      if (DEBUG) console.log('[DEBUG_RAZORPAY] authorization present but token invalid');
+    } catch (e) {
+      if (DEBUG) console.warn('[DEBUG_RAZORPAY] token verification error', e && e.message ? e.message : e);
+    }
+  }
+
+  // 2) x-uid header / query / body fallback (legacy)
+  const h = (req.headers['x-uid'] || req.headers['X-Uid'] || '').toString().trim();
+  const q = (req.query.uid || '').toString().trim();
+  const b = req.body && req.body.uid ? String(req.body.uid).trim() : '';
+  if (DEBUG) console.log('[DEBUG_RAZORPAY] readUid fallback: header,x,y ->', !!h, !!q, !!b);
+  return h || q || b || '';
+}
 const parseIntSafe = (v, d = 0) => {
   const n = parseInt(v, 10);
   return Number.isFinite(n) ? n : d;
@@ -116,62 +140,50 @@ const ordersMem = new Map(); // orderId -> {...}
 const subsMem = new Map(); // uid -> { subscriptionId, planId, status }
 
 /* ================= TOP-UP ================= */
-router.post("/create-order", express.json(), async (req, res) => {
+router.post("/create-order", express.json(), requireAuth, async (req, res) => {
   noStore(res);
   if (!rzpSvc.isConfigured()) return res.status(503).json({ message: "Razorpay keys not configured" });
 
-  const uid = readUid(req);
-  if (!uid) return res.status(401).json({ message: "Missing x-uid" });
+  const uid = req.uid;
+  if (!uid) return res.status(401).json({ message: 'Unauthorized' });
 
-  // Prefer planId-based flows (existing logic), but accept ad-hoc payloads from client
-  const planIdRaw = String(req.body?.planId || "").trim();
-  let plan = null;
-  if (planIdRaw) {
-    plan = pickTopupPlan(planIdRaw);
-    if (!plan || !plan.amountINR || !plan.credits) return res.status(404).json({ message: "Invalid planId" });
-  } else {
-    // Fallback: compute amount and credits from provided totals (client-side topup)
-    const total = Number(req.body?.total || 0);
-    const base = Number(req.body?.base || 0);
-    const gst = Number(req.body?.gst || 0);
-    const credits = parseIntSafe(req.body?.credits, 0);
-    const category = normalizeCategory(req.body?.category || req.body?.cat || req.body?.category || "image");
-
-    let amountINR = 0;
-    if (total > 0) amountINR = total;
-    else if (base > 0) amountINR = base + gst;
-
-    if (!amountINR || amountINR <= 0) {
-      return res.status(400).json({ message: "planId required or provide total/base+gst" });
-    }
-
-    plan = {
-      planId: req.body?.planId || `ad-hoc-${Date.now()}`,
-      amountINR: Number(amountINR),
-      credits: credits || 0,
-      category,
-    };
+  // Only trust server-side plan mapping
+  const incomingPlanId = String(req.body?.planId || '').trim();
+  const plan = getAuthoritativePlanById(incomingPlanId) || getTopupPlanById(incomingPlanId);
+  if (!plan || plan.type !== 'topup') {
+    return res.status(400).json({ message: 'Invalid planId' });
   }
 
   try {
-    const order = await rzpSvc.createOrder({
-      amount: plan.amountINR,
-      currency: "INR",
-      notes: { uid, planId: plan.planId, type: "topup", category: plan.category, credits: String(plan.credits) },
-    });
-    ordersMem.set(order.id, { uid, planId: plan.planId, category: plan.category, credits: plan.credits, amountINR: plan.amountINR, status: "created" });
-    res.json({ order, keyId: rzpSvc.getPublicKey(), meta: { merchantName: "Mogibaa AI", prefill: {} } });
+    const order = await rzpSvc.createOrder({ amount: plan.amountINR, currency: 'INR', notes: { uid, planId: plan.planId, type: 'topup', category: plan.category, credits: String(plan.credits) } });
+
+    // Persist order metadata (idempotent)
+    await db.collection('orders').doc(order.id).set({
+      uid,
+      planId: plan.planId,
+      category: plan.category,
+      credits: plan.credits,
+      amountPaise: order.amount,
+      amountINR: plan.amountINR,
+      currency: order.currency || 'INR',
+      receipt: order.receipt || null,
+      status: 'created',
+      createdAt: new Date(),
+      provider: 'razorpay',
+    }, { merge: true });
+
+    res.json({ order, keyId: rzpSvc.getPublicKey() });
   } catch (e) {
-    res.status(500).json({ message: e?.error?.description || e.message || "Failed to create order" });
+    res.status(500).json({ message: e?.error?.description || e.message || 'Failed to create order' });
   }
 });
 
-router.post("/verify", express.json(), async (req, res) => {
+router.post("/verify", express.json(), requireAuth, async (req, res) => {
   noStore(res);
   if (!rzpSvc.isConfigured()) return res.status(503).json({ message: "Razorpay keys not configured" });
 
-  const uid = readUid(req);
-  if (!uid) return res.status(401).json({ message: "Missing x-uid" });
+  const uid = req.uid;
+  if (!uid) return res.status(401).json({ message: 'Unauthorized' });
 
   const orderId = req.body.orderId || req.body.razorpay_order_id;
   const paymentId = req.body.paymentId || req.body.razorpay_payment_id;
@@ -181,35 +193,35 @@ router.post("/verify", express.json(), async (req, res) => {
   const ok = rzpSvc.verifyPaymentSignature({ order_id: orderId, payment_id: paymentId, signature });
   if (!ok) return res.status(400).json({ message: "Invalid signature" });
 
-  let ord = ordersMem.get(orderId);
-  if (!ord) {
-    try {
-      const fetched = await rzpSvc.fetchOrder(orderId);
-      const notes = fetched?.notes || {};
-      if (fetched && notes.uid && notes.type === "topup") {
-        ord = {
-          uid: notes.uid,
-          planId: notes.planId,
-          category: normalizeCategory(notes.category),
-          credits: parseIntSafe(notes.credits, 0),
-          amountINR: parseIntSafe(fetched.amount / 100, 0),
-          status: fetched.status || "paid",
-        };
-        ordersMem.set(orderId, ord);
-      }
-    } catch { }
-  }
-
-  if (!ord) return res.json({ ok: true }); // webhook will credit
-  if (ord.status === "paid") return res.json({ ok: true });
-  if (ord.uid !== uid) return res.status(403).json({ message: "UID mismatch" });
-
   try {
-    await creditsService.addCredits(uid, ord.category, ord.credits, { source: "razorpay", orderId, paymentId });
-    ord.status = "paid"; ordersMem.set(orderId, ord);
+    const ref = db.collection('orders').doc(orderId);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      // fetch as fallback
+      const fetched = await rzpSvc.fetchOrder(orderId).catch(() => null);
+      const notes = fetched?.notes || {};
+      await ref.set({
+        uid: notes.uid || uid,
+        planId: notes.planId || null,
+        category: normalizeCategory(notes.category),
+        credits: parseIntSafe(notes.credits, 0),
+        amountPaise: fetched?.amount || null,
+        currency: fetched?.currency || 'INR',
+        status: 'paid',
+        verifiedAt: new Date(),
+      }, { merge: true });
+    }
+    const ord = (await ref.get()).data() || {};
+    if (ord.uid && ord.uid !== uid) return res.status(403).json({ message: 'UID mismatch' });
+
+    // idempotent
+    if (ord.status !== 'paid') {
+      await ref.set({ status: 'paid', paymentId, verifiedAt: new Date() }, { merge: true });
+      await creditsService.addCredits(uid, ord.category || 'image', ord.credits || 0, { source: 'razorpay', orderId, paymentId });
+    }
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ message: e?.message || "Failed to add credits" });
+    res.status(500).json({ message: e?.message || 'Verification failed' });
   }
 });
 
@@ -218,8 +230,12 @@ async function createSubscriptionHandler(req, res) {
   noStore(res);
   if (!rzpSvc.isConfigured()) return res.status(503).json({ message: "Razorpay keys not configured" });
 
-  const uid = readUid(req);
-  if (!uid) return res.status(401).json({ message: "Missing x-uid" });
+  const uid = req.uid || (await readUid(req));
+  if (!uid) return res.status(401).json({ message: "Unauthorized" });
+  if (DEBUG) {
+    const hasAuth = !!(req.headers['authorization'] || req.headers['x-forwarded-authorization']);
+    console.log('[DEBUG_RAZORPAY][subscribe] uid=', uid, 'authHeaderPresent=', hasAuth);
+  }
 
   const planId = String(req.body?.planId || "");
   const rzpPlanId = String(req.body?.rzpPlanId || "");
@@ -227,7 +243,8 @@ async function createSubscriptionHandler(req, res) {
 
   const plan = resolveSubscriptionPlan({ planId, rzpPlanId });
   if (!plan || !isRzpPlanId(plan.rzpPlan)) {
-    return res.status(400).json({ message: "Razorpay plan id missing. Pass rzpPlanId or define in utils/plans.js" });
+    if (DEBUG) console.warn('[DEBUG_RAZORPAY][subscribe] Missing rzpPlan for planId=', planId, 'env/file likely not configured');
+    return res.status(400).json({ message: "Razorpay plan id missing. Configure RZP_PLAN_* env or provide rzpPlanId (plan_...)." });
   }
 
   try {
@@ -238,14 +255,14 @@ async function createSubscriptionHandler(req, res) {
       customerNotify: 1,
     });
     subsMem.set(uid, { subscriptionId: sub.id, planId: plan.id, status: sub.status || "created" });
-    res.json({ subscriptionId: sub.id, keyId: rzpSvc.getPublicKey(), meta: { merchantName: "Mogibaa AI", prefill: {} } });
+    res.json({ id: sub.id, subscriptionId: sub.id, keyId: rzpSvc.getPublicKey(), meta: { merchantName: "Mogibaa AI", prefill: {} } });
   } catch (e) {
     res.status(500).json({ message: e?.error?.description || e.message || "Failed to create subscription" });
   }
 }
 async function getSubscriptionStatusHandler(req, res) {
   noStore(res);
-  const uid = readUid(req);
+  const uid = await readUid(req);
   if (!uid) return res.status(401).json({ status: "unauthorized" });
   if (!rzpSvc.isConfigured()) return res.json({ status: "unknown" });
 
@@ -264,7 +281,7 @@ async function cancelSubscriptionHandler(req, res) {
   noStore(res);
   if (!rzpSvc.isConfigured()) return res.status(503).json({ message: "Razorpay keys not configured" });
 
-  const uid = readUid(req);
+  const uid = await readUid(req);
   if (!uid) return res.status(401).json({ message: "Missing x-uid" });
 
   const rec = subsMem.get(uid);
@@ -280,7 +297,7 @@ async function cancelSubscriptionHandler(req, res) {
 }
 
 /* aliases + main paths (so UI ఏ పేర్లు వాడినా OK) */
-router.post(["/create-subscription", "/subscribe"], express.json(), createSubscriptionHandler);
+router.post(["/create-subscription", "/subscribe"], express.json(), requireAuth, createSubscriptionHandler);
 router.get(["/subscription", "/sub-status"], getSubscriptionStatusHandler);
 router.post(["/cancel", "/sub-cancel"], express.json(), cancelSubscriptionHandler);
 
@@ -293,45 +310,95 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
   let evt = null;
   try { evt = JSON.parse(payload.toString("utf8")); } catch { return res.status(200).send("ok"); }
 
+  async function grantSubscriptionCreditsOnce({ uid, appPlanId, invoiceId, subscriptionId }) {
+    if (!uid || !appPlanId) return;
+    const grantId = invoiceId || `sub_${subscriptionId || ""}_${evt?.event || "unknown"}`;
+    if (!grantId) return;
+    const ref = db.collection('subscription_grants').doc(String(grantId));
+    const snap = await ref.get();
+    if (snap.exists) return; // idempotent
+    // get plan credits
+    let plan = null;
+    try { plan = getSubscriptionPlanById(appPlanId) || (PLANS && Array.isArray(PLANS.plans?.subscription) ? PLANS.plans.subscription.find(p => (p.id || p.planId) === appPlanId) : null); } catch { plan = null; }
+    const img = Number(plan?.credits?.image || 0);
+    const vid = Number(plan?.credits?.video || 0);
+    // Do not proceed if neither is positive
+    if (img <= 0 && vid <= 0) return;
+    // Commit grant doc first to avoid races
+    await ref.set({ uid, appPlanId, subscriptionId: subscriptionId || null, credits: { image: img, video: vid }, createdAt: new Date() });
+    // Apply credits
+    if (img > 0) await creditsService.addCredits(uid, 'image', img, { source: 'razorpay:subscription', invoiceId, subscriptionId, appPlanId });
+    if (vid > 0) await creditsService.addCredits(uid, 'video', vid, { source: 'razorpay:subscription', invoiceId, subscriptionId, appPlanId });
+  }
+
   try {
     // top-up credit
-    if (evt.event === "payment.captured" || evt.event === "payment.authorized") {
+    if (evt.event === 'payment.captured' || evt.event === 'payment.authorized') {
       const pay = evt.payload?.payment?.entity;
       const notes = pay?.notes || {};
       const orderId = pay?.order_id;
       const uid = notes.uid;
-      if (notes.type === "topup" && uid && orderId) {
+      if (notes.type === 'topup' && uid && orderId) {
         const category = normalizeCategory(notes.category);
         const credits = parseIntSafe(notes.credits, 0);
-        const rec = ordersMem.get(orderId) || { status: "created" };
-        if (rec.status !== "paid") {
-          await creditsService.addCredits(uid, category, credits, { source: "razorpay:webhook", orderId, paymentId: pay?.id });
-          rec.status = "paid"; rec.uid = uid; rec.category = category; rec.credits = credits;
-          ordersMem.set(orderId, rec);
+        const ref = db.collection('orders').doc(orderId);
+        const snap = await ref.get();
+        const ord = snap.exists ? snap.data() : {};
+        if (ord.status !== 'paid') {
+          await ref.set({
+            uid,
+            planId: notes.planId || ord.planId || null,
+            category,
+            credits,
+            amountPaise: pay?.amount || ord.amountPaise || null,
+            currency: pay?.currency || ord.currency || 'INR',
+            status: 'paid',
+            paymentId: pay?.id,
+            webhookAt: new Date(),
+          }, { merge: true });
+          await creditsService.addCredits(uid, category, credits, { source: 'razorpay:webhook', orderId, paymentId: pay?.id });
         }
       }
     }
 
-    // subscription status track
+    if (evt.event === 'payment.failed') {
+      const pay = evt.payload?.payment?.entity;
+      const orderId = pay?.order_id;
+      if (orderId) await db.collection('orders').doc(orderId).set({ status: 'failed', webhookAt: new Date() }, { merge: true });
+    }
+
+    // subscription events
+    if (evt.event === "invoice.paid") {
+      const invoice = evt.payload?.invoice?.entity || null;
+      const notes = invoice?.notes || {};
+      const uid = notes.uid || notes.userId || null;
+      const appPlanId = notes.appPlanId || notes.planId || null;
+      const subscriptionId = invoice?.subscription_id || null;
+      if (uid && subscriptionId) {
+        subsMem.set(uid, { subscriptionId, planId: appPlanId || subsMem.get(uid)?.planId || "", status: "active" });
+      }
+      if (uid && appPlanId) {
+        await grantSubscriptionCreditsOnce({ uid, appPlanId, invoiceId: invoice?.id || null, subscriptionId });
+      }
+    }
+
     if (
-      evt.event === "invoice.paid" ||
       evt.event === "subscription.activated" ||
       evt.event === "subscription.charged" ||
-      evt.event === "subscription.cancelled" ||
       evt.event === "subscription.completed" ||
-      evt.event === "subscription.paused"
+      evt.event === "subscription.paused" ||
+      evt.event === "subscription.cancelled"
     ) {
       const sub = evt.payload?.subscription?.entity || null;
-      const notes =
-        evt.payload?.subscription?.entity?.notes ||
-        evt.payload?.invoice?.entity?.notes || {};
-      const uid = notes.uid;
+      const notes = sub?.notes || {};
+      const uid = notes.uid || null;
+      const appPlanId = notes.appPlanId || null;
       if (uid && sub?.id) {
-        subsMem.set(uid, {
-          subscriptionId: sub.id,
-          planId: notes.appPlanId || subsMem.get(uid)?.planId || "",
-          status: sub.status || "active",
-        });
+        subsMem.set(uid, { subscriptionId: sub.id, planId: appPlanId || subsMem.get(uid)?.planId || "", status: sub.status || "active" });
+      }
+      // On activation, grant once as a fallback (some accounts may not receive invoice.paid immediately)
+      if (evt.event === 'subscription.activated' && uid && appPlanId) {
+        await grantSubscriptionCreditsOnce({ uid, appPlanId, invoiceId: null, subscriptionId: sub?.id || null });
       }
     }
   } catch { }

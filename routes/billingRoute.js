@@ -3,18 +3,18 @@ const rzpSvc = require('../services/razorpayService');
 
 const router = express.Router();
 
-// helper: prefer Authorization Bearer token, fallback to x-uid
+// helper: prefer Authorization Bearer token, fallback to x-uid (accept X-Forwarded-Authorization)
 const getUidFromRequest = async (req) => {
-    const auth = (req.headers['authorization'] || '').toString();
-    if (auth.toLowerCase().startsWith('bearer ')) {
+    const auth = (req.headers['authorization'] || req.headers['x-forwarded-authorization'] || '').toString();
+    if (auth && auth.toLowerCase().startsWith('bearer ')) {
         try {
-            const admin = require('firebase-admin');
+            const admin = require('../utils/firebaseUtils').admin || require('firebase-admin');
             const token = auth.split(' ')[1];
             const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
             if (decoded && decoded.uid) return decoded.uid;
-        } catch { }
+        } catch (e) { /* ignore */ }
     }
-    const h = (req.headers['x-uid'] || '').toString().trim();
+    const h = (req.headers['x-uid'] || req.headers['X-Uid'] || '').toString().trim();
     const q = (req.query?.uid || '').toString().trim();
     const b = req.body?.uid ? String(req.body.uid).trim() : '';
     return h || q || b || '';

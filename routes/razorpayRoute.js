@@ -19,9 +19,12 @@ const rzp = new Razorpay({
 async function requireAuth(req, res, next) {
   try {
     const h = req.headers || {};
+    // Prefer Authorization header, but also accept X-Forwarded-Authorization from proxies
     const authHeader = (
       h["authorization"] ||
       h["Authorization"] ||
+      h["x-forwarded-authorization"] ||
+      h["X-Forwarded-Authorization"] ||
       ""
     ).toString();
 

@@ -95,23 +95,46 @@ app.use(
 app.use(express.json({ limit: "20mb" }));
 
 // CORS: allow dev localhost and production frontend, permit Authorization and X-Uid
-const allowedOrigins = ["http://localhost:3000", "https://mogibaai.com"];
+const allowedOrigins = ["http://localhost:3000", "https://mogibaai.com", "https://www.mogibaai.com"];
 app.use(
   cors({
     origin: function (origin, callback) {
       // allow requests with no origin (e.g. curl, server-to-server)
       if (!origin) return callback(null, true);
+      // exact match list
       if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
-      const msg =
-        "The CORS policy for this site does not allow access from the specified Origin.";
+      // allow any subdomain of mogibaai.com
+      try {
+        const u = new URL(origin);
+        if (u.hostname && (u.hostname === 'mogibaai.com' || u.hostname.endsWith('.mogibaai.com'))) return callback(null, true);
+      } catch (_) { }
+      const msg = "The CORS policy for this site does not allow access from the specified Origin.";
       return callback(new Error(msg), false);
     },
     credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization", "X-Uid"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Uid", "X-Forwarded-Authorization", "X-Email"],
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   }),
 );
-console.log("CORS: allowed origins ->", allowedOrigins.join(", "));
+console.log("CORS: allowed origins ->", allowedOrigins.join(", "), ' + *.mogibaai.com');
+
+// Important: when credentials:true is used, Access-Control-Allow-Origin must
+// NOT be the wildcard '*' — some environments or proxies may rewrite headers
+// and cause the browser to reject credentialed responses. Ensure we echo the
+// incoming Origin for allowed origins to be explicit.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (!origin) return next();
+  try {
+    const u = new URL(origin);
+    const host = u.hostname;
+    if (allowedOrigins.indexOf(origin) !== -1 || host === 'mogibaai.com' || host.endsWith('.mogibaai.com') || host === 'localhost') {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+  } catch (e) { }
+  return next();
+});
 
 // === Routes ===
 const plansRoute = require("./routes/plansRoute");
@@ -120,7 +143,12 @@ const paymentsRoute = require("./routes/paymentsRoute"); // /api/payments/razorp
 
 // Keep other existing routes
 const textToImageRoutes = require("./routes/textToImageRoutes");
-const gptRoute = require("./routes/gptRoute");
+let gptRoute = null;
+try {
+  gptRoute = require("./routes/gptRoute");
+} catch (e) {
+  console.warn("[WARN] gptRoute failed to load (OpenAI key may be missing). Skipping gpt routes.", e && e.message);
+}
 const userRoute = require("./routes/userRoute");
 const adminRoute = require("./routes/adminRoute");
 
@@ -143,7 +171,7 @@ const debugRoute = require("./routes/debugRoute");
 app.use("/api/debug", debugRoute);
 
 app.use("/api/text2img", textToImageRoutes);
-app.use("/api/gpt", gptRoute);
+if (gptRoute) app.use("/api/gpt", gptRoute);
 app.use("/api/user", userRoute);
 app.use("/api/admin", adminRoute);
 

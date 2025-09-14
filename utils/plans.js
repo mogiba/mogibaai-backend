@@ -19,14 +19,14 @@ const path = require("path");
 /* ========== TOP-UP mapping (by key) ========== */
 const TOPUP_MAP = {
   // ===== Image Plans =====
-  img_baby_300:   { planId: "img_baby_300",   category: "image", amountINR: 300,  credits: 600,  label: "₹300 • 600 Image Credits" },
-  img_starter_900:{ planId: "img_starter_900",category: "image", amountINR: 900,  credits: 1800, label: "₹900 • 1800 Image Credits" },
-  img_pro_1800:   { planId: "img_pro_1800",   category: "image", amountINR: 1800, credits: 3700, label: "₹1800 • 3700 Image Credits" },
+  img_baby_300: { planId: "img_baby_300", category: "image", amountINR: 300, credits: 600, label: "₹300 • 600 Image Credits" },
+  img_starter_900: { planId: "img_starter_900", category: "image", amountINR: 900, credits: 1800, label: "₹900 • 1800 Image Credits" },
+  img_pro_1800: { planId: "img_pro_1800", category: "image", amountINR: 1800, credits: 3700, label: "₹1800 • 3700 Image Credits" },
 
   // ===== Video Plans =====
-  vid_baby_500:   { planId: "vid_baby_500",   category: "video", amountINR: 500,  credits: 500,  label: "₹500 • 500 Video Credits" },
-  vid_starter_900:{ planId: "vid_starter_900",category: "video", amountINR: 900,  credits: 1000, label: "₹900 • 1000 Video Credits" },
-  vid_pro_1800:   { planId: "vid_pro_1800",   category: "video", amountINR: 1800, credits: 2100, label: "₹1800 • 2100 Video Credits" },
+  vid_baby_500: { planId: "vid_baby_500", category: "video", amountINR: 500, credits: 500, label: "₹500 • 500 Video Credits" },
+  vid_starter_900: { planId: "vid_starter_900", category: "video", amountINR: 900, credits: 1000, label: "₹900 • 1000 Video Credits" },
+  vid_pro_1800: { planId: "vid_pro_1800", category: "video", amountINR: 1800, credits: 2100, label: "₹1800 • 2100 Video Credits" },
 };
 
 /* -------- Helpers: map -> arrays (routes expect arrays) -------- */
@@ -52,7 +52,7 @@ function readJsonPlans() {
       const raw = fs.readFileSync(p, "utf8");
       return JSON.parse(raw);
     }
-  } catch (_) {}
+  } catch (_) { }
   return {};
 }
 const FILE_RZP = readJsonPlans();
@@ -62,37 +62,63 @@ function resolveRzpPlan(which) {
     case "starter":
       return process.env.RZP_PLAN_STARTER || FILE_RZP.starter || "";
     case "pro":
-      return process.env.RZP_PLAN_PRO     || FILE_RZP.pro     || "";
+      return process.env.RZP_PLAN_PRO || FILE_RZP.pro || "";
     case "ultra":
-      return process.env.RZP_PLAN_ULTRA   || FILE_RZP.ultra   || "";
+      return process.env.RZP_PLAN_ULTRA || FILE_RZP.ultra || "";
     default:
       return "";
   }
 }
 
+// Authoritative mapping for subscription plans used by server for pricing/credits
+// Also compute savings vs pay-as-you-go rates: image ₹0.50/credit, video ₹1.50/credit
+function computeSavings(amountINR, credits) {
+  const img = (credits?.image || 0) * 0.5;
+  const vid = (credits?.video || 0) * 1.5;
+  const value = Math.round((img + vid));
+  const savingsINR = Math.max(0, value - Number(amountINR || 0));
+  const savingsPercent = value > 0 ? Math.round((savingsINR / value) * 100) : 0;
+  return { valueINR: value, savingsINR, savingsPercent };
+}
+
 const SUBSCRIPTION = [
   {
     id: "sub-starter",
-    title: "Starter",
-    price: 999,
-    rzpPlan: resolveRzpPlan("starter"), // may be '' → server route can accept rzpPlanId from client
-    features: ["200 Image Credits", "8 Video Credits", "All AI Tools Access", "Basic Support"],
+    planId: "starter_monthly",
+    name: "Starter",
+    amountINR: 999,
+    credits: { image: 800, video: 200 },
+    billingInterval: "monthly",
+    features: ["800 Image Credits", "200 Video Credits", "All AI Tools Access", "Basic Support"],
+    category: "subscription",
+    rzpPlan: resolveRzpPlan("starter"),
   },
   {
     id: "sub-pro",
-    title: "Pro",
-    price: 1999,
+    planId: "pro_monthly",
+    name: "Pro",
+    amountINR: 1999,
+    credits: { image: 1300, video: 540 },
+    billingInterval: "monthly",
+    features: ["1,300 Image Credits", "540 Video Credits", "Priority Support", "Unlimited Project Save"],
+    category: "subscription",
     rzpPlan: resolveRzpPlan("pro"),
-    features: ["2,500 Image Credits", "100 Video Credits", "Priority Support", "Unlimited Project Save"],
   },
   {
     id: "sub-ultra",
-    title: "Ultra",
-    price: 3999,
+    planId: "ultra_monthly",
+    name: "Ultra",
+    amountINR: 3999,
+    credits: { image: 2200, video: 1200 },
+    billingInterval: "monthly",
+    features: ["2,200 Image Credits", "1,200 Video Credits", "Dedicated Support", "All Features Unlocked"],
+    category: "subscription",
     rzpPlan: resolveRzpPlan("ultra"),
-    features: ["6,000 Image Credits", "300 Video Credits", "Dedicated Support", "All Features Unlocked"],
   },
-];
+].map((p) => ({
+  ...p,
+  ...computeSavings(p.amountINR, p.credits),
+}));
 
 /* ========== Exported structure ========== */
 const plans = {
@@ -116,7 +142,42 @@ function getTopupPlanById(planId) {
   return TOPUP_MAP[planId] || null;
 }
 function getSubscriptionPlanById(id) {
-  return SUBSCRIPTION.find((p) => p.id === id) || null;
+  return SUBSCRIPTION.find((p) => p.id === id || p.planId === id) || null;
+}
+
+/** Get authoritative plan by id for server trust (top-up or subscription) */
+function getAuthoritativePlanById(planId) {
+  if (!planId) return null;
+  // check top-up map first
+  if (TOPUP_MAP[planId]) {
+    const p = TOPUP_MAP[planId];
+    return {
+      type: 'topup',
+      planId: p.planId,
+      name: p.label,
+      amountINR: Number(p.amountINR),
+      credits: p.credits,
+      billingInterval: null,
+      features: [],
+      category: p.category,
+    };
+  }
+  // subscription
+  const s = getSubscriptionPlanById(planId);
+  if (s) {
+    return {
+      type: 'subscription',
+      planId: s.planId || s.id,
+      name: s.name || s.title,
+      amountINR: Number(s.amountINR || s.price),
+      credits: s.credits || { image: 0, video: 0 },
+      billingInterval: s.billingInterval || 'monthly',
+      features: s.features || [],
+      category: 'subscription',
+      rzpPlan: s.rzpPlan || '',
+    };
+  }
+  return null;
 }
 
 module.exports = {
@@ -126,4 +187,5 @@ module.exports = {
   getTopupPlanById,
   getSubscriptionPlanById,
   resolveRzpPlan,
+  getAuthoritativePlanById,
 };
