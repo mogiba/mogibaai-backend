@@ -11,6 +11,9 @@
 const express = require('express');
 const router = express.Router();
 
+// firebase admin (to verify ID tokens when Authorization header provided)
+const { admin } = require('../utils/firebaseUtils');
+
 // Services (already present in your repo per earlier files)
 const creditsService = require('../services/creditsService');
 
@@ -18,11 +21,32 @@ const creditsService = require('../services/creditsService');
 const noStore = (res) => res.set('Cache-Control', 'no-store');
 const ok = (v) => typeof v !== 'undefined' && v !== null;
 
-function readUid(req) {
+async function readUid(req) {
   // prefer header; allow query fallback for internal tests
   const h = (req.headers['x-uid'] || req.headers['X-Uid'] || '').toString().trim();
+  if (h) return h;
   const q = (req.query.uid || '').toString().trim();
-  return h || q || '';
+  if (q) return q;
+
+  // Fallback: try Authorization: Bearer <idToken>
+  try {
+    const auth = (req.headers['authorization'] || req.headers['Authorization'] || '').toString();
+    if (auth && auth.toLowerCase().startsWith('bearer ')) {
+      const token = auth.split(' ')[1];
+      if (token) {
+        try {
+          const decoded = await admin.auth().verifyIdToken(token);
+          if (decoded && decoded.uid) return decoded.uid;
+        } catch (e) {
+          // token invalid or verification failed -> fallthrough to return empty
+        }
+      }
+    }
+  } catch (e) {
+    // ignore any errors and return empty
+  }
+
+  return '';
 }
 
 function parseQty(v, def = 1) {
@@ -44,8 +68,8 @@ function safeCreditsShape(obj) {
 // -------- GET /api/credits --------
 router.get('/', async (req, res) => {
   noStore(res);
-  const uid = readUid(req);
-  if (!uid) return res.status(401).json({ message: 'Missing x-uid' });
+  const uid = await readUid(req);
+  if (!uid) return res.status(401).json({ message: 'Missing uid or Authorization' });
 
   try {
     const data = await creditsService.getUserCredits(uid);
@@ -60,8 +84,8 @@ router.get('/', async (req, res) => {
 // -------- POST /api/credits/spend --------
 router.post('/spend', express.json(), async (req, res) => {
   noStore(res);
-  const uid = readUid(req);
-  if (!uid) return res.status(401).json({ message: 'Missing x-uid' });
+  const uid = await readUid(req);
+  if (!uid) return res.status(401).json({ message: 'Missing uid or Authorization' });
 
   const category = normalizeCategory(req.body?.category);
   const qty = parseQty(req.body?.qty, 1);
@@ -89,8 +113,8 @@ router.post('/spend', express.json(), async (req, res) => {
 // body: { category: 'image'|'video', qty: number, meta?: object }
 router.post('/add', express.json(), async (req, res) => {
   noStore(res);
-  const uid = readUid(req);
-  if (!uid) return res.status(401).json({ message: 'Missing x-uid' });
+  const uid = await readUid(req);
+  if (!uid) return res.status(401).json({ message: 'Missing uid or Authorization' });
 
   const category = normalizeCategory(req.body?.category);
   const qty = parseQty(req.body?.qty, 0);
