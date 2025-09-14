@@ -48,14 +48,14 @@ if (storageKeyPath) {
         const j = JSON.parse(fs.readFileSync(storageKeyPath, 'utf8'));
         const b = j.bucket || j.bucket_name || j.storageBucket;
         if (b) process.env.FIREBASE_STORAGE_BUCKET = b;
-      } catch {}
+      } catch { }
     }
   }
   if (!process.env.FIREBASE_STORAGE_BUCKET) {
     try {
       const sa = JSON.parse(fs.readFileSync(saKeyPath, 'utf8'));
       if (sa.project_id) process.env.FIREBASE_STORAGE_BUCKET = `${sa.project_id}.appspot.com`;
-    } catch {}
+    } catch { }
   }
   if (process.env.FIREBASE_STORAGE_BUCKET) {
     console.log('🪣 Storage bucket =', process.env.FIREBASE_STORAGE_BUCKET);
@@ -74,7 +74,21 @@ app.use('/api/payments/razorpay/webhook', express.raw({ type: 'application/json'
 
 // Global middleware for the rest
 app.use(express.json({ limit: '20mb' }));
-app.use(cors());
+
+// Strict CORS: allow single frontend origin and credentials when provided
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || process.env.FRONTEND_ORIGIN || process.env.REACT_APP_CLIENT_ORIGIN || '';
+if (CLIENT_ORIGIN) {
+  app.use(cors({
+    origin: CLIENT_ORIGIN,
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-uid', 'x-email'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  }));
+  console.log('CORS: restricted to', CLIENT_ORIGIN);
+} else {
+  app.use(cors());
+  console.warn('CORS: no CLIENT_ORIGIN provided; using permissive CORS (set CLIENT_ORIGIN env to restrict)');
+}
 
 // === Routes ===
 const plansRoute = require('./routes/plansRoute');
@@ -95,6 +109,13 @@ app.get('/', (req, res) => res.send('Mogibaa backend is running!'));
 app.use('/api/plans', plansRoute);
 app.use('/api/credits', creditsRoute);
 app.use('/api/payments/razorpay', paymentsRoute);
+// New billing endpoints (minimal wrapper over payments/razorpay flows)
+const billingRoute = require('./routes/billingRoute');
+app.use('/api/billing', billingRoute);
+
+// Debug echo endpoints (POST /api/debug/echo)
+const debugRoute = require('./routes/debugRoute');
+app.use('/api/debug', debugRoute);
 
 app.use('/api/text2img', textToImageRoutes);
 app.use('/api/gpt', gptRoute);
