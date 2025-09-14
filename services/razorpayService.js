@@ -33,7 +33,24 @@ function ensureClient() {
     err.code = "RZP_SDK_MISSING";
     throw err;
   }
-  if (!client) client = new Razorpay({ key_id: KEY_ID, key_secret: KEY_SECRET });
+  if (!client) {
+    // Ensure outgoing requests to Razorpay bypass any system HTTP(S)_PROXY.
+    // We temporarily remove proxy env vars when initializing the SDK so
+    // the SDK's internal HTTP client connects directly.
+    const savedHttpProxy = process.env.HTTP_PROXY;
+    const savedHttpsProxy = process.env.HTTPS_PROXY;
+    try {
+      delete process.env.HTTP_PROXY;
+      delete process.env.http_proxy;
+      delete process.env.HTTPS_PROXY;
+      delete process.env.https_proxy;
+      client = new Razorpay({ key_id: KEY_ID, key_secret: KEY_SECRET });
+    } finally {
+      // restore proxy env vars for other services (e.g., Replicate)
+      if (typeof savedHttpProxy !== 'undefined') process.env.HTTP_PROXY = savedHttpProxy;
+      if (typeof savedHttpsProxy !== 'undefined') process.env.HTTPS_PROXY = savedHttpsProxy;
+    }
+  }
   return client;
 }
 

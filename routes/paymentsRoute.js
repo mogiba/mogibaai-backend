@@ -12,6 +12,31 @@ try { PLANS = require("../utils/plans"); } catch { PLANS = null; }
 
 const router = express.Router();
 
+// TEMP DEBUG: echo headers + token decode (REMOVE IN PRODUCTION)
+router.get('/debug/headers', async (req, res) => {
+  try {
+    const headers = req.headers || {};
+    const out = { headers: {}, tokenInfo: null };
+    // copy headers but limit length
+    Object.keys(headers).forEach(k => { try { out.headers[k] = String(headers[k]).slice(0, 200); } catch { } });
+    // try to decode Authorization Bearer token using firebase-admin if available
+    const authHeader = (req.headers['authorization'] || '').toString();
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+      const token = authHeader.split(' ')[1];
+      try {
+        const admin = require('firebase-admin');
+        const decoded = await admin.auth().verifyIdToken(token).catch(() => null);
+        if (decoded) out.tokenInfo = { uid: decoded.uid, email: decoded.email || null, iss: decoded.iss || null }; else out.tokenInfo = { error: 'invalid_token' };
+      } catch (e) {
+        out.tokenInfo = { error: 'firebase_admin_not_available', message: String(e.message || e) };
+      }
+    }
+    res.json({ ok: true, debug: out });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 /* --------------- helpers --------------- */
 const noStore = (res) => res.set("Cache-Control", "no-store");
 const readUid = (req) => {
@@ -32,28 +57,28 @@ const isRzpPlanId = (s) => typeof s === "string" && /^plan_/i.test(s);
 
 /* ---------- topup plans ---------- */
 const ALIASES = {
-  img_baby_300:   ["img_baby_300","img-300","image-300","img300","300img","img_baby"],
-  img_starter_900:["img_starter_900","img-900","image-900","img900","900img","img_starter"],
-  img_pro_1800:   ["img_pro_1800","img-1800","image-1800","img1800","1800img","img_pro"],
-  vid_baby_500:   ["vid_baby_500","vid-500","video-500","vid500","500vid","vid_baby"],
-  vid_starter_900:["vid_starter_900","vid-900","video-900","vid900","900vid","vid_starter"],
-  vid_pro_1800:   ["vid_pro_1800","vid-1800","video-1800","vid1800","1800vid","vid_pro"],
+  img_baby_300: ["img_baby_300", "img-300", "image-300", "img300", "300img", "img_baby"],
+  img_starter_900: ["img_starter_900", "img-900", "image-900", "img900", "900img", "img_starter"],
+  img_pro_1800: ["img_pro_1800", "img-1800", "image-1800", "img1800", "1800img", "img_pro"],
+  vid_baby_500: ["vid_baby_500", "vid-500", "video-500", "vid500", "500vid", "vid_baby"],
+  vid_starter_900: ["vid_starter_900", "vid-900", "video-900", "vid900", "900vid", "vid_starter"],
+  vid_pro_1800: ["vid_pro_1800", "vid-1800", "video-1800", "vid1800", "1800vid", "vid_pro"],
 };
 function toCanon(id) {
-  const s = String(id||"").toLowerCase();
+  const s = String(id || "").toLowerCase();
   for (const [canon, list] of Object.entries(ALIASES)) {
-    if (list.map(x=>x.toLowerCase()).includes(s)) return canon;
+    if (list.map(x => x.toLowerCase()).includes(s)) return canon;
   }
   return s;
 }
 function planFromCanon(canon) {
   switch (canon) {
-    case "img_baby_300":   return { planId: canon, amountINR: 300,  credits: 600,  category: "image", label: "₹300 • 600 Image Credits" };
-    case "img_starter_900":return { planId: canon, amountINR: 900,  credits: 1800, category: "image", label: "₹900 • 1800 Image Credits" };
-    case "img_pro_1800":   return { planId: canon, amountINR: 1800, credits: 3700, category: "image", label: "₹1800 • 3700 Image Credits" };
-    case "vid_baby_500":   return { planId: canon, amountINR: 500,  credits: 500,  category: "video", label: "₹500 • 500 Video Credits" };
-    case "vid_starter_900":return { planId: canon, amountINR: 900,  credits: 1000, category: "video", label: "₹900 • 1000 Video Credits" };
-    case "vid_pro_1800":   return { planId: canon, amountINR: 1800, credits: 2100, category: "video", label: "₹1800 • 2100 Video Credits" };
+    case "img_baby_300": return { planId: canon, amountINR: 300, credits: 600, category: "image", label: "₹300 • 600 Image Credits" };
+    case "img_starter_900": return { planId: canon, amountINR: 900, credits: 1800, category: "image", label: "₹900 • 1800 Image Credits" };
+    case "img_pro_1800": return { planId: canon, amountINR: 1800, credits: 3700, category: "image", label: "₹1800 • 3700 Image Credits" };
+    case "vid_baby_500": return { planId: canon, amountINR: 500, credits: 500, category: "video", label: "₹500 • 500 Video Credits" };
+    case "vid_starter_900": return { planId: canon, amountINR: 900, credits: 1000, category: "video", label: "₹900 • 1000 Video Credits" };
+    case "vid_pro_1800": return { planId: canon, amountINR: 1800, credits: 2100, category: "video", label: "₹1800 • 2100 Video Credits" };
     default: return null;
   }
 }
@@ -88,7 +113,7 @@ function resolveSubscriptionPlan({ planId, rzpPlanId }) {
 
 /* ---------- in-memory ---------- */
 const ordersMem = new Map(); // orderId -> {...}
-const subsMem   = new Map(); // uid -> { subscriptionId, planId, status }
+const subsMem = new Map(); // uid -> { subscriptionId, planId, status }
 
 /* ================= TOP-UP ================= */
 router.post("/create-order", express.json(), async (req, res) => {
@@ -148,7 +173,7 @@ router.post("/verify", express.json(), async (req, res) => {
   const uid = readUid(req);
   if (!uid) return res.status(401).json({ message: "Missing x-uid" });
 
-  const orderId   = req.body.orderId   || req.body.razorpay_order_id;
+  const orderId = req.body.orderId || req.body.razorpay_order_id;
   const paymentId = req.body.paymentId || req.body.razorpay_payment_id;
   const signature = req.body.signature || req.body.razorpay_signature;
   if (!orderId || !paymentId || !signature) return res.status(400).json({ message: "Missing verification fields" });
@@ -172,7 +197,7 @@ router.post("/verify", express.json(), async (req, res) => {
         };
         ordersMem.set(orderId, ord);
       }
-    } catch {}
+    } catch { }
   }
 
   if (!ord) return res.json({ ok: true }); // webhook will credit
@@ -196,7 +221,7 @@ async function createSubscriptionHandler(req, res) {
   const uid = readUid(req);
   if (!uid) return res.status(401).json({ message: "Missing x-uid" });
 
-  const planId    = String(req.body?.planId || "");
+  const planId = String(req.body?.planId || "");
   const rzpPlanId = String(req.body?.rzpPlanId || "");
   if (!planId && !isRzpPlanId(rzpPlanId)) return res.status(400).json({ message: "planId or rzpPlanId required" });
 
@@ -256,7 +281,7 @@ async function cancelSubscriptionHandler(req, res) {
 
 /* aliases + main paths (so UI ఏ పేర్లు వాడినా OK) */
 router.post(["/create-subscription", "/subscribe"], express.json(), createSubscriptionHandler);
-router.get (["/subscription", "/sub-status"], getSubscriptionStatusHandler);
+router.get(["/subscription", "/sub-status"], getSubscriptionStatusHandler);
 router.post(["/cancel", "/sub-cancel"], express.json(), cancelSubscriptionHandler);
 
 /* ================= webhook ================= */
@@ -277,7 +302,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
       const uid = notes.uid;
       if (notes.type === "topup" && uid && orderId) {
         const category = normalizeCategory(notes.category);
-        const credits  = parseIntSafe(notes.credits, 0);
+        const credits = parseIntSafe(notes.credits, 0);
         const rec = ordersMem.get(orderId) || { status: "created" };
         if (rec.status !== "paid") {
           await creditsService.addCredits(uid, category, credits, { source: "razorpay:webhook", orderId, paymentId: pay?.id });
@@ -309,7 +334,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
         });
       }
     }
-  } catch {}
+  } catch { }
   res.status(200).send("ok");
 });
 
