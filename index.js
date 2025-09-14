@@ -1,51 +1,64 @@
 // index.js – stable (webhook-first, storage bucket auto-resolve, routes wired)
 
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 
 // --- Razorpay debug (safe) ---
-const kId = (process.env.RAZORPAY_KEY_ID || '').trim();
-const kSec = (process.env.RAZORPAY_KEY_SECRET || '').trim();
-console.log('🔑 RZP KEY_ID ..', kId ? kId.slice(-6) : 'missing', '| SECRET loaded:', !!kSec);
+const kId = (process.env.RAZORPAY_KEY_ID || "").trim();
+const kSec = (process.env.RAZORPAY_KEY_SECRET || "").trim();
+console.log(
+  "🔑 RZP KEY_ID ..",
+  kId ? kId.slice(-6) : "missing",
+  "| SECRET loaded:",
+  !!kSec,
+);
 
 // --- Resolve Google SA key (REQUIRED) ---
-const CANDIDATE_SA_ETC = '/etc/secrets/sa-key.json';
-const LOCAL_SA = path.join(__dirname, 'secrets', 'sa-key.json');
+const CANDIDATE_SA_ETC = "/etc/secrets/sa-key.json";
+const LOCAL_SA = path.join(__dirname, "secrets", "sa-key.json");
 const saKeyPath = fs.existsSync(CANDIDATE_SA_ETC) ? CANDIDATE_SA_ETC : LOCAL_SA;
 
 if (!fs.existsSync(saKeyPath)) {
-  console.error('❌ Google Service Account key file NOT found at', saKeyPath);
-  throw new Error('Google Service Account key file not found');
+  console.error("❌ Google Service Account key file NOT found at", saKeyPath);
+  throw new Error("Google Service Account key file not found");
 }
 console.log(`✅ SA key found at ${saKeyPath}`);
 process.env.GOOGLE_APPLICATION_CREDENTIALS = saKeyPath;
 
 // --- Resolve Storage key (OPTIONAL) ---
-const CANDIDATE_STORAGE_ETC = '/etc/secrets/mogibaa-storage-key.json';
-const LOCAL_STORAGE = path.join(__dirname, 'secrets', 'mogibaa-storage-key.json');
+const CANDIDATE_STORAGE_ETC = "/etc/secrets/mogibaa-storage-key.json";
+const LOCAL_STORAGE = path.join(
+  __dirname,
+  "secrets",
+  "mogibaa-storage-key.json",
+);
 
-let storageKeyPath = '';
-if (fs.existsSync(CANDIDATE_STORAGE_ETC)) storageKeyPath = CANDIDATE_STORAGE_ETC;
+let storageKeyPath = "";
+if (fs.existsSync(CANDIDATE_STORAGE_ETC))
+  storageKeyPath = CANDIDATE_STORAGE_ETC;
 else if (fs.existsSync(LOCAL_STORAGE)) storageKeyPath = LOCAL_STORAGE;
 
 if (storageKeyPath) {
   console.log(`✅ Storage key found at ${storageKeyPath}`);
   process.env.GOOGLE_STORAGE_KEY = storageKeyPath;
 } else {
-  console.warn('⚠️  Storage key file NOT found (OK). Will infer bucket from env or service account.');
+  console.warn(
+    "⚠️  Storage key file NOT found (OK). Will infer bucket from env or service account.",
+  );
 }
 
 // --- Ensure FIREBASE_STORAGE_BUCKET env ---
 (function ensureBucketEnv() {
   if (!process.env.FIREBASE_STORAGE_BUCKET) {
     if (process.env.REACT_APP_FIREBASE_STORAGE_BUCKET) {
-      process.env.FIREBASE_STORAGE_BUCKET = process.env.REACT_APP_FIREBASE_STORAGE_BUCKET;
+      process.env.FIREBASE_STORAGE_BUCKET =
+        process.env.REACT_APP_FIREBASE_STORAGE_BUCKET;
     } else if (storageKeyPath) {
       try {
-        const j = JSON.parse(fs.readFileSync(storageKeyPath, 'utf8'));
+        const j = JSON.parse(fs.readFileSync(storageKeyPath, "utf8"));
         const b = j.bucket || j.bucket_name || j.storageBucket;
         if (b) process.env.FIREBASE_STORAGE_BUCKET = b;
       } catch { }
@@ -53,74 +66,86 @@ if (storageKeyPath) {
   }
   if (!process.env.FIREBASE_STORAGE_BUCKET) {
     try {
-      const sa = JSON.parse(fs.readFileSync(saKeyPath, 'utf8'));
-      if (sa.project_id) process.env.FIREBASE_STORAGE_BUCKET = `${sa.project_id}.appspot.com`;
+      const sa = JSON.parse(fs.readFileSync(saKeyPath, "utf8"));
+      if (sa.project_id)
+        process.env.FIREBASE_STORAGE_BUCKET = `${sa.project_id}.appspot.com`;
     } catch { }
   }
   if (process.env.FIREBASE_STORAGE_BUCKET) {
-    console.log('🪣 Storage bucket =', process.env.FIREBASE_STORAGE_BUCKET);
+    console.log("🪣 Storage bucket =", process.env.FIREBASE_STORAGE_BUCKET);
   } else {
-    console.warn('⚠️  FIREBASE_STORAGE_BUCKET not resolved yet; utils/firebaseUtils handles this gracefully.');
+    console.warn(
+      "⚠️  FIREBASE_STORAGE_BUCKET not resolved yet; utils/firebaseUtils handles this gracefully.",
+    );
   }
 })();
 
 // --- Early bootstrap firebase-admin via our helper ---
-require('./utils/firebaseUtils');
+require("./utils/firebaseUtils");
 
 const app = express();
 
 /* === CRITICAL: Razorpay webhook must get RAW body BEFORE json parser === */
-app.use('/api/payments/razorpay/webhook', express.raw({ type: 'application/json' }));
+app.use(
+  "/api/payments/razorpay/webhook",
+  express.raw({ type: "application/json" }),
+);
 
 // Global middleware for the rest
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({ limit: "20mb" }));
 
-// Strict CORS: allow single frontend origin and credentials when provided
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || process.env.FRONTEND_ORIGIN || process.env.REACT_APP_CLIENT_ORIGIN || '';
-if (CLIENT_ORIGIN) {
-  app.use(cors({
-    origin: CLIENT_ORIGIN,
+// CORS: allow dev localhost and production frontend, permit Authorization and X-Uid
+const allowedOrigins = ["http://localhost:3000", "https://mogibaai.com"];
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // allow requests with no origin (e.g. curl, server-to-server)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
+      const msg =
+        "The CORS policy for this site does not allow access from the specified Origin.";
+      return callback(new Error(msg), false);
+    },
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-uid', 'x-email'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  }));
-  console.log('CORS: restricted to', CLIENT_ORIGIN);
-} else {
-  app.use(cors());
-  console.warn('CORS: no CLIENT_ORIGIN provided; using permissive CORS (set CLIENT_ORIGIN env to restrict)');
-}
+    allowedHeaders: ["Content-Type", "Authorization", "X-Uid"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  }),
+);
+console.log("CORS: allowed origins ->", allowedOrigins.join(", "));
 
 // === Routes ===
-const plansRoute = require('./routes/plansRoute');
-const creditsRoute = require('./routes/creditsRoute');
-const paymentsRoute = require('./routes/paymentsRoute'); // /api/payments/razorpay
+const plansRoute = require("./routes/plansRoute");
+const creditsRoute = require("./routes/creditsRoute");
+const paymentsRoute = require("./routes/paymentsRoute"); // /api/payments/razorpay
 
 // Keep other existing routes
-const textToImageRoutes = require('./routes/textToImageRoutes');
-const gptRoute = require('./routes/gptRoute');
-const userRoute = require('./routes/userRoute');
-const adminRoute = require('./routes/adminRoute');
+const textToImageRoutes = require("./routes/textToImageRoutes");
+const gptRoute = require("./routes/gptRoute");
+const userRoute = require("./routes/userRoute");
+const adminRoute = require("./routes/adminRoute");
 
 // Health
-app.get('/health', (req, res) => res.json({ status: 'ok', message: 'Backend is live!' }));
-app.get('/', (req, res) => res.send('Mogibaa backend is running!'));
+app.get("/health", (req, res) =>
+  res.json({ status: "ok", message: "Backend is live!" }),
+);
+app.get("/", (req, res) => res.send("Mogibaa backend is running!"));
 
 // Mount
-app.use('/api/plans', plansRoute);
-app.use('/api/credits', creditsRoute);
-app.use('/api/payments/razorpay', paymentsRoute);
+app.use("/api/plans", plansRoute);
+app.use("/api/credits", creditsRoute);
+app.use("/api/payments/razorpay", paymentsRoute);
 // New billing endpoints (minimal wrapper over payments/razorpay flows)
-const billingRoute = require('./routes/billingRoute');
-app.use('/api/billing', billingRoute);
+const billingRoute = require("./routes/billingRoute");
+app.use("/api/billing", billingRoute);
 
 // Debug echo endpoints (POST /api/debug/echo)
-const debugRoute = require('./routes/debugRoute');
-app.use('/api/debug', debugRoute);
+const debugRoute = require("./routes/debugRoute");
+app.use("/api/debug", debugRoute);
 
-app.use('/api/text2img', textToImageRoutes);
-app.use('/api/gpt', gptRoute);
-app.use('/api/user', userRoute);
-app.use('/api/admin', adminRoute);
+app.use("/api/text2img", textToImageRoutes);
+app.use("/api/gpt", gptRoute);
+app.use("/api/user", userRoute);
+app.use("/api/admin", adminRoute);
 
 // Start
 const PORT = process.env.PORT || 4000;
