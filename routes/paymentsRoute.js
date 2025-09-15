@@ -214,11 +214,13 @@ router.post("/verify", express.json(), requireAuth, async (req, res) => {
     const ord = (await ref.get()).data() || {};
     if (ord.uid && ord.uid !== uid) return res.status(403).json({ message: 'UID mismatch' });
 
-    // idempotent
-    if (ord.status !== 'paid') {
-      await ref.set({ status: 'paid', paymentId, verifiedAt: new Date() }, { merge: true });
-      await creditsService.addCredits(uid, ord.category || 'image', ord.credits || 0, { source: 'razorpay', orderId, paymentId });
+    // idempotent using credited flag primarily
+    if (ord.credited === true) {
+      return res.json({ ok: true, credited: false, orderId });
     }
+
+    await ref.set({ status: 'paid', paymentId, verifiedAt: new Date(), credited: true }, { merge: true });
+    await creditsService.addCredits(uid, ord.category || 'image', ord.credits || 0, { source: 'razorpay', orderId, paymentId });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ message: e?.message || 'Verification failed' });
@@ -344,7 +346,9 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
         const ref = db.collection('orders').doc(orderId);
         const snap = await ref.get();
         const ord = snap.exists ? snap.data() : {};
-        if (ord.status !== 'paid') {
+        if (ord.credited === true) {
+          // already credited via verify/webhook earlier
+        } else {
           await ref.set({
             uid,
             planId: notes.planId || ord.planId || null,
@@ -355,6 +359,7 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
             status: 'paid',
             paymentId: pay?.id,
             webhookAt: new Date(),
+            credited: true,
           }, { merge: true });
           await creditsService.addCredits(uid, category, credits, { source: 'razorpay:webhook', orderId, paymentId: pay?.id });
         }
