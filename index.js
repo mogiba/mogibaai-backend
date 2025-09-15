@@ -162,9 +162,15 @@ app.get("/", (req, res) => res.send("Mogibaa backend is running!"));
 app.use("/api/plans", plansRoute);
 app.use("/api/credits", creditsRoute);
 app.use("/api/payments/razorpay", paymentsRoute);
+// Replicate webhook must be raw; mount before global json parser is fine since we already used raw for RZP.
+const replicateWebhookRoute = require('./routes/replicateWebhookRoute');
+app.use('/api/replicate', replicateWebhookRoute);
 // New billing endpoints (minimal wrapper over payments/razorpay flows)
 const billingRoute = require("./routes/billingRoute");
 app.use("/api/billing", billingRoute);
+// Img2Img routes (multipart + json) under /api
+const img2imgRoute = require('./routes/img2imgRoute');
+app.use('/api', img2imgRoute);
 
 // Debug echo endpoints (POST /api/debug/echo)
 const debugRoute = require("./routes/debugRoute");
