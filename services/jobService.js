@@ -3,7 +3,7 @@ const credits = require('./creditsService');
 
 const NOW = () => admin.firestore.FieldValue.serverTimestamp();
 
-async function createJob({ userId, modelKey, model, version, input, cost }) {
+async function createJob({ userId, modelKey, model, version, input, cost, pricePerImage, requestedImages }) {
     const ref = db.collection('jobs').doc();
     const job = {
         _id: ref.id,
@@ -17,8 +17,28 @@ async function createJob({ userId, modelKey, model, version, input, cost }) {
         output: [],
         error: null,
         cost: cost || 1,
+        pricePerImage: pricePerImage || null,
+        requestedImages: requestedImages || null,
     };
     await ref.set(job);
+    // Create a pending credits hold transaction
+    try {
+        const txRef = db.collection('creditsTransactions').doc(`hold_${ref.id}`);
+        await txRef.set({
+            kind: 'hold',
+            jobId: ref.id,
+            uid: userId,
+            category: 'image',
+            amount: job.cost,
+            status: 'pending',
+            createdAt: NOW(),
+            updatedAt: NOW(),
+            meta: {
+                pricePerImage: pricePerImage || null,
+                requestedImages: requestedImages || null,
+            }
+        });
+    } catch { }
     return job;
 }
 
@@ -43,9 +63,17 @@ async function ensureDebitOnce({ jobId, userId, category, cost }) {
         // spend credit
         await credits.spendCredit(userId, category, cost);
         tx.set(ref, { debited: true, updatedAt: NOW() }, { merge: true });
+        // finalize hold transaction
+        const txRef = db.collection('creditsTransactions').doc(`hold_${jobId}`);
+        tx.set(txRef, { status: 'captured', updatedAt: NOW() }, { merge: true });
         return { skipped: false };
     });
     return out;
 }
 
-module.exports = { createJob, updateJob, getJob, ensureDebitOnce };
+async function finalizeHold(jobId, status, meta = {}) {
+    const txRef = db.collection('creditsTransactions').doc(`hold_${jobId}`);
+    await txRef.set({ status, updatedAt: NOW(), ...meta }, { merge: true });
+}
+
+module.exports = { createJob, updateJob, getJob, ensureDebitOnce, finalizeHold };

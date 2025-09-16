@@ -128,7 +128,7 @@ router.post('/approve-deletion', requireAdmin, express.json(), async (req, res) 
       const batch = db.batch();
       reqs.forEach((d) => batch.update(d.ref, { status: 'approved', reviewedBy: adminUid, reviewedAt: new Date() }));
       if (!reqs.empty) await batch.commit();
-    } catch (_) {}
+    } catch (_) { }
 
     // Audit
     try {
@@ -140,7 +140,7 @@ router.post('/approve-deletion', requireAdmin, express.json(), async (req, res) 
         result,
         time: new Date(),
       });
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({ ok: true, result });
   } catch (e) {
@@ -178,7 +178,7 @@ router.post('/reject-deletion', requireAdmin, express.json(), async (req, res) =
         })
       );
       if (!reqs.empty) await batch.commit();
-    } catch (_) {}
+    } catch (_) { }
 
     // Audit
     try {
@@ -191,7 +191,7 @@ router.post('/reject-deletion', requireAdmin, express.json(), async (req, res) =
         result,
         time: new Date(),
       });
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({ ok: true, result });
   } catch (e) {
@@ -218,7 +218,7 @@ router.post('/auto-purge', requireAdmin, express.json(), async (req, res) => {
         resultSummary: { deletedCount: result.deletedCount || 0 },
         time: new Date(),
       });
-    } catch (_) {}
+    } catch (_) { }
 
     return res.json({ ok: true, result });
   } catch (e) {
@@ -246,6 +246,59 @@ router.get('/user/:uid/requests', requireAdmin, async (req, res) => {
     return res.json({ ok: true, items });
   } catch (e) {
     return res.status(500).json({ error: 'USER_REQUESTS_FAILED', message: e.message });
+  }
+});
+
+// Metrics endpoint: GET /api/admin/metrics (server-rendered JSON acceptable)
+router.get('/metrics', requireAdmin, async (req, res) => {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    // Jobs metrics
+    const q = db.collection('jobs').where('updatedAt', '>=', since);
+    const snap = await q.get();
+    let created = 0, succeeded = 0, failed = 0, canceled = 0;
+    const latencies = []; const attempts = [];
+    snap.forEach((d) => {
+      const j = d.data();
+      created += 1;
+      if (j.status === 'succeeded') succeeded += 1;
+      else if (j.status === 'failed') failed += 1;
+      else if (j.status === 'canceled') canceled += 1;
+      const l = j?.metrics?.createLatencyMs;
+      if (Number.isFinite(Number(l))) latencies.push(Number(l));
+      const a = j?.metrics?.replicateCreateAttempts;
+      if (Number.isFinite(Number(a))) attempts.push(Number(a));
+    });
+    latencies.sort((a, b) => a - b);
+    const p = (arr, pct) => arr.length ? arr[Math.min(arr.length - 1, Math.floor((pct / 100) * arr.length))] : null;
+    const p50 = p(latencies, 50);
+    const p95 = p(latencies, 95);
+    const avgAttempts = attempts.length ? (attempts.reduce((s, x) => s + x, 0) / attempts.length) : null;
+
+    // Moderation rejects
+    const modSnap = await db.collection('moderationEvents').where('createdAt', '>=', since).get();
+    const moderationRejects = modSnap.size;
+
+    // 402 / 429 events from apiEvents
+    let lowCredits = 0, rateLimited = 0;
+    try {
+      const evSnap = await db.collection('apiEvents').where('createdAt', '>=', since).get();
+      evSnap.forEach((d) => {
+        const t = d.data().type;
+        if (t === 'LOW_CREDITS') lowCredits += 1;
+        else if (t === 'RATE_LIMITED' || t === 'RATE_LIMITED_IP') rateLimited += 1;
+      });
+    } catch (_) { }
+
+    const data = { windowHours: 24, created, succeeded, failed, canceled, moderationRejects, lowCredits402: lowCredits, rateLimited429: rateLimited, p50CreateLatencyMs: p50, p95CreateLatencyMs: p95, avgCreateAttempts: avgAttempts };
+
+    if ((req.headers['accept'] || '').includes('text/html')) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.end(`<pre>${JSON.stringify({ ok: true, metrics: data }, null, 2)}</pre>`);
+    }
+    return res.json({ ok: true, metrics: data });
+  } catch (e) {
+    return res.status(500).json({ error: 'METRICS_FAILED', message: e.message });
   }
 });
 

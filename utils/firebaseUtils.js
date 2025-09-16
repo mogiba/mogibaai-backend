@@ -2,7 +2,7 @@
 // - Resolves service account from FIREBASE_KEY / GOOGLE_APPLICATION_CREDENTIALS / ./secrets/sa-key.json
 // - Resolves Storage bucket from FIREBASE_STORAGE_BUCKET / GCS_BUCKET_NAME / GOOGLE_STORAGE_KEY(json) / <project_id>.appspot.com
 // - Initializes firebase-admin idempotently
-// - Exports: { admin, db, bucket, saveToGallery, getSignedUrlForPath }
+// - Exports: { admin, db, bucket, saveToGallery, getSignedUrlForPath, INPUT_ROOT, OUTPUT_ROOT, PUBLIC_ROOT, buildOwnerInputPath, buildOwnerOutputPath, buildPublicPath, copyObject, deleteObject }
 //   (bucket is created only if we have a valid bucketName; else still exports null to avoid crash)
 
 const admin = require('firebase-admin');
@@ -143,3 +143,54 @@ async function saveToGallery(userId, imageUrl, prompt, base64Data) {
 }
 
 module.exports = { admin, db, bucket, saveToGallery, getSignedUrlForPath };
+
+/* ---------- Shared Storage Path Roots ---------- */
+const INPUT_ROOT = 'user-uploads';
+const OUTPUT_ROOT = 'user-outputs';
+const PUBLIC_ROOT = 'public';
+
+function cleanSegment(s) {
+  return String(s || '').replace(/[^a-zA-Z0-9_\-\.]/g, '');
+}
+
+function buildOwnerInputPath(uid, filename) {
+  const u = cleanSegment(uid);
+  const f = cleanSegment(filename || uuidv4());
+  return `${INPUT_ROOT}/${u}/${f}`;
+}
+
+function buildOwnerOutputPath(uid, jobId, filename) {
+  const u = cleanSegment(uid);
+  const j = cleanSegment(jobId);
+  const f = cleanSegment(filename || `${uuidv4()}.jpg`);
+  return `${OUTPUT_ROOT}/${u}/${j}/${f}`;
+}
+
+function buildPublicPath(shortId, filename) {
+  const s = cleanSegment(shortId || uuidv4().slice(0, 8));
+  const f = cleanSegment(filename || `${uuidv4()}.jpg`);
+  return `${PUBLIC_ROOT}/${s}/${f}`;
+}
+
+async function copyObject(srcPath, destPath, options = {}) {
+  if (!bucket) throw new Error('Storage bucket not configured');
+  const src = bucket.file(srcPath);
+  const dest = bucket.file(destPath);
+  await src.copy(dest, { metadata: options.metadata || {} });
+  return { ok: true };
+}
+
+async function deleteObject(storagePath) {
+  if (!bucket) throw new Error('Storage bucket not configured');
+  await bucket.file(storagePath).delete({ ignoreNotFound: true });
+  return { ok: true };
+}
+
+module.exports.INPUT_ROOT = INPUT_ROOT;
+module.exports.OUTPUT_ROOT = OUTPUT_ROOT;
+module.exports.PUBLIC_ROOT = PUBLIC_ROOT;
+module.exports.buildOwnerInputPath = buildOwnerInputPath;
+module.exports.buildOwnerOutputPath = buildOwnerOutputPath;
+module.exports.buildPublicPath = buildPublicPath;
+module.exports.copyObject = copyObject;
+module.exports.deleteObject = deleteObject;

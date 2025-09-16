@@ -67,6 +67,20 @@ const MODELS = {
         enabled: envOr('RPL_GFPGAN_ENABLED', 'true') === 'true',
         label: 'GFPGAN',
     },
+    // Text-to-Image: ByteDance SeeDream-4
+    'seedream4': {
+        slug: 'bytedance/seedream-4',
+        // Pinned version (do not pull from env; do not auto-resolve)
+        version: 'be069276b45ac0143746a5f46deba0478ec0333a3bb0e1fb0227cc4a7b5bc910',
+        category: 'image',
+        cost: 1,
+        enabled: envOr('RPL_SEEDREAM4_ENABLED', 'true') === 'true',
+        label: 'ByteDance SeeDream-4 (4K)',
+        // Allowed inputs from client
+        allowedSizes: ['1K', '2K', '4K', 'custom'],
+        allowedAspectRatios: ['match_input_image', '1:1', '4:3', '16:9', '9:16', '3:2', '2:3'],
+        limits: { maxWidth: 4096, maxHeight: 4096, maxImages: 15 },
+    },
 };
 
 const FEATURE_REPLICATE_IMG2IMG = (process.env.FEATURE_REPLICATE_IMG2IMG || 'true') === 'true';

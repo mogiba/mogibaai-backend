@@ -2,6 +2,8 @@ const express = require('express');
 const { db } = require('../utils/firebaseUtils');
 const rpl = require('../services/replicateService');
 const jobs = require('../services/jobService');
+const credits = require('../services/creditsService');
+const { storeReplicateOutput } = require('../services/outputStore');
 
 const router = express.Router();
 
@@ -24,8 +26,34 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     // idempotent state machine
     if (status === 'succeeded') {
-        await jobs.updateJob(job._id, { status: 'succeeded', output, webhookReceivedAt: new Date() });
-        await jobs.ensureDebitOnce({ jobId: job._id, userId: job.userId, category: 'image', cost: job.cost || 1 }).catch(() => null);
+        // Persist output to our storage; rewrite URL if stored
+        let stored = false;
+        let newOutputs = [];
+        for (const u of output) {
+            const r = await storeReplicateOutput({ uid: job.userId, jobId: job._id, url: u });
+            if (r.ok && r.stored) { stored = true; newOutputs.push(r.storagePath || r.url); } else { newOutputs.push(u); }
+        }
+        const billedImages = Array.isArray(newOutputs) ? newOutputs.length : 0;
+        const hasPerImage = Number.isFinite(Number(job.pricePerImage));
+        if (hasPerImage) {
+            const ppi = Number(job.pricePerImage || 0);
+            const totalDebited = Math.max(0, billedImages * ppi);
+            await jobs.updateJob(job._id, { status: 'succeeded', output: newOutputs, stored, billedImages, totalDebited, webhookReceivedAt: new Date() });
+            if (totalDebited > 0) {
+                await jobs.ensureDebitOnce({ jobId: job._id, userId: job.userId, category: 'image', cost: totalDebited }).catch(() => null);
+                let remaining = null;
+                try { const have = await credits.getUserCredits(job.userId); remaining = have?.image ?? null; } catch { remaining = null; }
+                await jobs.finalizeHold(job._id, 'captured', { pricePerImage: ppi, billedImages, totalDebited, remainingBalance: remaining }).catch(() => null);
+            } else {
+                await jobs.finalizeHold(job._id, 'released_nothing_to_bill').catch(() => null);
+            }
+        } else {
+            await jobs.updateJob(job._id, { status: 'succeeded', output: newOutputs, stored, webhookReceivedAt: new Date() });
+            await jobs.ensureDebitOnce({ jobId: job._id, userId: job.userId, category: 'image', cost: job.cost || 1 }).catch(() => null);
+            let remaining = null;
+            try { const have = await credits.getUserCredits(job.userId); remaining = have?.image ?? null; } catch { remaining = null; }
+            await jobs.finalizeHold(job._id, 'captured', { price: job.cost || 1, remainingBalance: remaining }).catch(() => null);
+        }
         // Optional post-process chaining
         const parent = await jobs.getJob(job._id);
         const pp = parent?.postprocess || {};
@@ -60,6 +88,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         }
     } else if (status === 'failed' || status === 'canceled') {
         await jobs.updateJob(job._id, { status, error: pred?.error || null, webhookReceivedAt: new Date() });
+        // release hold
+        await jobs.finalizeHold(job._id, status === 'failed' ? 'released_failed' : 'released_canceled', { reason: pred?.error || null }).catch(() => null);
     }
 
     res.status(200).send('ok');

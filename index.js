@@ -5,6 +5,7 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const { FEATURE_REPLICATE_IMG2IMG } = require('./config/replicateModels');
 
 // --- Razorpay debug (safe) ---
 const kId = (process.env.RAZORPAY_KEY_ID || "").trim();
@@ -82,6 +83,7 @@ if (storageKeyPath) {
 
 // --- Early bootstrap firebase-admin via our helper ---
 require("./utils/firebaseUtils");
+const { bucket: __storageBucket } = require('./utils/firebaseUtils');
 
 const app = express();
 
@@ -158,6 +160,12 @@ app.get("/health", (req, res) =>
 );
 app.get("/", (req, res) => res.send("Mogibaa backend is running!"));
 
+// Features discovery for frontend gating
+app.get('/api/features', (req, res) => {
+  const STORAGE_BACKEND = process.env.STORAGE_BACKEND || 'firebase';
+  res.json({ ok: true, features: { FEATURE_REPLICATE_IMG2IMG, STORAGE_BACKEND } });
+});
+
 // Mount
 app.use("/api/plans", plansRoute);
 app.use("/api/credits", creditsRoute);
@@ -171,6 +179,9 @@ app.use("/api/billing", billingRoute);
 // Img2Img routes (multipart + json) under /api
 const img2imgRoute = require('./routes/img2imgRoute');
 app.use('/api', img2imgRoute);
+// Txt2Img routes (text inputs)
+const txt2imgRoute = require('./routes/txt2imgRoute');
+app.use('/api', txt2imgRoute);
 
 // Debug echo endpoints (POST /api/debug/echo)
 const debugRoute = require("./routes/debugRoute");
@@ -183,8 +194,35 @@ app.use("/api/admin", adminRoute);
 
 // Start
 const PORT = process.env.PORT || 4000;
+// Fail fast for Replicate secrets when feature is enabled
+if (FEATURE_REPLICATE_IMG2IMG) {
+  const tok = (process.env.REPLICATE_API_TOKEN || '').trim();
+  const whs = (process.env.REPLICATE_WEBHOOK_SECRET || '').trim();
+  if (!tok || !whs) {
+    console.error('❌ Missing Replicate configuration:', {
+      hasToken: !!tok,
+      hasWebhookSecret: !!whs,
+    });
+    throw new Error('REPLICATE_API_TOKEN and REPLICATE_WEBHOOK_SECRET are required when FEATURE_REPLICATE_IMG2IMG is enabled');
+  }
+  // Ensure Firebase Storage bucket available when running img2img
+  const STORAGE_BACKEND = process.env.STORAGE_BACKEND || 'firebase';
+  if (STORAGE_BACKEND === 'firebase') {
+    if (!__storageBucket) {
+      console.error('❌ Firebase Storage bucket not configured. Set FIREBASE_STORAGE_BUCKET or ensure service account project_id is present.');
+      throw new Error('Firebase Storage bucket required for img2img when STORAGE_BACKEND=firebase');
+    }
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`✅ Server started on http://localhost:${PORT}`);
   console.log(`Using SA Key path: ${saKeyPath}`);
   if (storageKeyPath) console.log(`Using Storage Key path: ${storageKeyPath}`);
+  try {
+    const { startSweeper } = require('./services/sweeper');
+    startSweeper();
+  } catch (e) {
+    console.warn('Sweeper not started:', e && e.message);
+  }
 });
