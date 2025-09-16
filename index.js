@@ -17,6 +17,14 @@ console.log(
   !!kSec,
 );
 
+// Debug proxy scope (Replicate-only)
+console.log('Proxy scope', {
+  FIXIE_URL: !!process.env.FIXIE_URL,
+  HTTP_PROXY: !!process.env.HTTP_PROXY,
+  HTTPS_PROXY: !!process.env.HTTPS_PROXY,
+  note: 'Proxy will be used only for Replicate via replicateFetch()/agent',
+});
+
 // --- Resolve Google SA key (REQUIRED) ---
 const CANDIDATE_SA_ETC = "/etc/secrets/sa-key.json";
 const LOCAL_SA = path.join(__dirname, "secrets", "sa-key.json");

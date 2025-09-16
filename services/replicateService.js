@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { getReplicateAgent } = require('../lib/proxy');
 
 const API = 'https://api.replicate.com/v1';
 const TOKEN = process.env.REPLICATE_API_TOKEN || '';
@@ -33,11 +34,15 @@ async function withRetry(fn, { attempts = 3, baseMs = 500 } = {}) {
 async function createPrediction({ version, input, webhook, webhook_events_filter }) {
     const t = Date.now();
     try {
+        const agent = getReplicateAgent();
         const { value: resp, attemptsUsed } = await withRetry(() => axios.post(`${API}/predictions`, {
             version, input, webhook, webhook_events_filter,
         }, {
             headers: { Authorization: `Token ${TOKEN}`, 'Content-Type': 'application/json' },
             timeout: 120000,
+            httpAgent: agent,
+            httpsAgent: agent,
+            proxy: false,
         }));
         const latencyMs = Date.now() - t;
         logJSON('replicate.createPrediction.ok', { ...contextLogger(), version, latencyMs, attemptsUsed });
@@ -58,9 +63,13 @@ async function createPrediction({ version, input, webhook, webhook_events_filter
 
 async function cancelPrediction(id) {
     const t = Date.now();
+    const agent = getReplicateAgent();
     const resp = await axios.post(`${API}/predictions/${id}/cancel`, {}, {
         headers: { Authorization: `Token ${TOKEN}` },
         timeout: 15000,
+        httpAgent: agent,
+        httpsAgent: agent,
+        proxy: false,
     }).catch((e) => {
         logJSON('replicate.cancel.err', { ...contextLogger(), id, dt: Date.now() - t, msg: e?.message });
         return null;
@@ -72,9 +81,13 @@ async function cancelPrediction(id) {
 async function getPrediction(id) {
     const t = Date.now();
     try {
+        const agent = getReplicateAgent();
         const resp = await axios.get(`${API}/predictions/${id}`, {
             headers: { Authorization: `Token ${TOKEN}` },
             timeout: 20000,
+            httpAgent: agent,
+            httpsAgent: agent,
+            proxy: false,
         });
         logJSON('replicate.get.ok', { ...contextLogger(), id, dt: Date.now() - t });
         return resp.data;
@@ -106,9 +119,13 @@ async function resolveLatestVersion(owner, fallbackVersion = '') {
     const hit = versionCache.get(owner);
     if (hit && (now - hit.ts) < VERSION_TTL_MS) return hit.id;
     try {
+        const agent = getReplicateAgent();
         const resp = await axios.get(`${API}/models/${owner}`, {
             headers: { Authorization: `Token ${TOKEN}` },
             timeout: 20000,
+            httpAgent: agent,
+            httpsAgent: agent,
+            proxy: false,
         });
         const id = resp?.data?.latest_version?.id;
         if (!id) throw new Error('No latest_version.id');
