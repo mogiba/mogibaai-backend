@@ -58,18 +58,11 @@ async function handleReplicateWebhook(req, res) {
                 // Create/Upsert gallery doc under users/{uid}/images/{jobId}-{i}
                 const gid = `${job._id}-${i}`;
                 try {
-                    // Write document as per requested schema
+                    // Flip placeholder to succeeded and fill URLs
                     await db.collection('users').doc(job.userId).collection('images').doc(gid).set({
-                        uid: job.userId,
-                        jobId: job._id,
-                        modelKey: job.modelKey || 'seedream4',
-                        aspectRatio: job?.input?.aspect_ratio || 'match_input_image',
-                        size: job?.input?.size || (job.pricePerImage === 48 ? '4K' : '2K'),
+                        status: 'succeeded',
                         storagePath: r.storagePath,
                         downloadURL: signed?.url || null,
-                        status: 'private',
-                        tags: [],
-                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
                     }, { merge: true });
                     galleryDocs.push(gid);
@@ -123,6 +116,16 @@ async function handleReplicateWebhook(req, res) {
                 updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             }, { merge: true });
         } catch (_) { }
+        // Also set outputsCount once on the first doc
+        try {
+            await db.collection('users').doc(job.userId).collection('images').doc(`${job._id}-0`).set({
+                outputsCount: Array.isArray(storedOutputs) ? storedOutputs.length : 0,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+        } catch (_) { }
+
+        console.log('[webhook] stored', { uid: job.userId, jobId: job._id, outputs: billedImages });
+
         // Optional post-process chaining
         const parent = await jobs.getJob(job._id);
         const pp = parent?.postprocess || {};
@@ -160,6 +163,13 @@ async function handleReplicateWebhook(req, res) {
         // release hold
         await jobs.finalizeHold(job._id, status === 'failed' ? 'released_failed' : 'released_canceled', { reason: pred?.error || null }).catch(() => null);
         try { await db.collection('imageGenerations').doc(job._id).set({ status, error: pred?.error || null, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }); } catch (_) { }
+        // Mark placeholders failed
+        try {
+            const q = await db.collection('users').doc(job.userId).collection('images').where('jobId', '==', job._id).get();
+            const batch = db.batch();
+            q.forEach((d) => batch.set(d.ref, { status: 'failed', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }));
+            if (!q.empty) await batch.commit();
+        } catch (_) { }
     }
     res.status(200).send('ok');
 }

@@ -134,6 +134,42 @@ router.post('/txt2img', requireAuth, async (req, res) => {
         } catch (e) {
             return res.status(403).json({ ok: false, error: 'IMAGE_GENERATION_DOC_CREATE_FAILED', message: e?.message });
         }
+
+        // Placeholder docs in users/{uid}/images/{jobId}-{i} (status: pending)
+        try {
+            const numOutputs = Number(replicateInput.max_images || requestedImages || 1);
+            const ar = replicateInput.aspect_ratio || 'match_input_image';
+            const sz = (replicateInput.size === '4K') ? '4K' : '2K';
+            const previewDataUrl = 'data:image/svg+xml;utf8,' + encodeURIComponent(`<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="160" height="160"><rect width="100%" height="100%" fill="#1f2237"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#9aa4d6" font-size="14" font-family="Arial, Helvetica, sans-serif">Generating…</text></svg>`);
+            const batch = db.batch();
+            for (let i = 0; i < numOutputs; i++) {
+                const ref = db.collection('users').doc(uid).collection('images').doc(`${job._id}-${i}`);
+                batch.set(ref, {
+                    uid,
+                    jobId: job._id,
+                    index: i,
+                    tool: 'text2img',
+                    modelKey,
+                    aspectRatio: ar,
+                    size: sz,
+                    caption: '',
+                    tags: [],
+                    visibility: 'private',
+                    status: 'pending',
+                    downloadURL: null,
+                    storagePath: null,
+                    previewURL: previewDataUrl,
+                    outputsCount: numOutputs,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                }, { merge: true });
+            }
+            await batch.commit();
+            console.log('[txt2img] placeholders created', { uid, jobId: job._id, count: numOutputs });
+        } catch (e) {
+            // Do not fail the request on placeholder error; continue
+            console.warn('[txt2img] placeholder creation failed', e && e.message);
+        }
         const base = (process.env.PUBLIC_API_BASE || '').replace(/\/$/, '');
         const webhook = `${base}/api/webhooks/replicate?uid=${encodeURIComponent(uid)}&jobId=${encodeURIComponent(job._id)}`;
         const webhook_secret = process.env.REPLICATE_WEBHOOK_SECRET || '';
