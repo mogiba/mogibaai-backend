@@ -4,7 +4,7 @@ const { MODELS, getModel, ENV } = require('../config/replicateModels');
 const rpl = require('../services/replicateService');
 const jobs = require('../services/jobService');
 const credits = require('../services/creditsService');
-const { db } = require('../utils/firebaseUtils');
+const { db, admin } = require('../utils/firebaseUtils');
 const { moderateInput, logModerationEvent } = require('../lib/moderation');
 
 const router = express.Router();
@@ -37,6 +37,11 @@ router.post('/txt2img', requireAuth, async (req, res) => {
     const uid = req.uid;
     const started = Date.now();
     try {
+        // If client sends uid, it must match signer (defensive)
+        const bodyUid = req.body && typeof req.body.uid !== 'undefined' ? String(req.body.uid) : null;
+        if (bodyUid && bodyUid !== uid) {
+            return res.status(403).json({ ok: false, error: 'UID_MISMATCH' });
+        }
         // throttles
         const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
         const ipr = ipLimit(ip);
@@ -110,12 +115,35 @@ router.post('/txt2img', requireAuth, async (req, res) => {
 
         // Create job and enqueue prediction
         const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages });
-        const webhook = (process.env.PUBLIC_API_BASE || '').replace(/\/$/, '') + '/api/replicate/webhook';
+
+        // Create imageGenerations/{jobId} document with required fields (rules: uid must equal auth.uid)
+        try {
+            const genRef = db.collection('imageGenerations').doc(job._id);
+            await genRef.set({
+                uid,
+                prompt: replicateInput.prompt || '',
+                modelKey,
+                size: (replicateInput.size === '4K') ? '4K' : '2K',
+                aspectRatio: replicateInput.aspect_ratio || 'match_input_image',
+                max_images: replicateInput.max_images || 1,
+                creditsSpent: cost,
+                status: 'pending',
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: false });
+        } catch (e) {
+            return res.status(403).json({ ok: false, error: 'IMAGE_GENERATION_DOC_CREATE_FAILED', message: e?.message });
+        }
+        const base = (process.env.PUBLIC_API_BASE || '').replace(/\/$/, '');
+        const webhook = `${base}/api/webhooks/replicate?uid=${encodeURIComponent(uid)}&jobId=${encodeURIComponent(job._id)}`;
+        const webhook_secret = process.env.REPLICATE_WEBHOOK_SECRET || '';
+        console.log('[txt2img] job created', { jobId: job._id, webhook });
         if (typeof rpl.setReplicateLogContext === 'function') rpl.setReplicateLogContext(() => ({ uid, jobId: job._id, modelKey, modelVersion: model.version }));
         // Use pinned version from config; do not resolve dynamically
         const useVersion = model.version;
-        const { data, latencyMs, attemptsUsed } = await rpl.createPrediction({ version: useVersion, input: replicateInput, webhook, webhook_events_filter: ['completed'] });
+        const { data, latencyMs, attemptsUsed } = await rpl.createPrediction({ version: useVersion, input: replicateInput, webhook, webhook_events_filter: ['completed'], webhook_secret });
         await jobs.updateJob(job._id, { status: 'running', provider: 'replicate', providerPredictionId: data.id, metrics: { createLatencyMs: latencyMs, replicateCreateAttempts: attemptsUsed }, modelResolvedVersion: useVersion });
+        try { await db.collection('imageGenerations').doc(job._id).set({ replicatePredictionId: data.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }); } catch { }
         logJSON('txt2img.queued', { uid, jobId: job._id, model: modelKey, version: useVersion });
         return res.json({ ok: true, jobId: job._id, env: ENV });
     } catch (e) {
@@ -131,7 +159,14 @@ router.post('/txt2img', requireAuth, async (req, res) => {
 router.get('/txt2img/:id', requireAuth, async (req, res) => {
     const j = await jobs.getJob(req.params.id);
     if (!j || j.userId !== req.uid) return res.status(404).json({ ok: false, error: 'not_found' });
-    return res.json({ ok: true, job: j });
+    let out = Array.isArray(j.output) ? j.output : [];
+    // Normalize: ensure each item is an object with storagePath/filename/contentType/bytes
+    out = out.map((it) => {
+        if (typeof it === 'string') return { storagePath: it, filename: it.split('/').pop(), contentType: null, bytes: null };
+        const o = it || {};
+        return { storagePath: o.storagePath || null, filename: o.filename || (o.storagePath ? String(o.storagePath).split('/').pop() : null), contentType: o.contentType || null, bytes: o.bytes || null };
+    });
+    return res.json({ ok: true, job: { ...j, output: out } });
 });
 
 router.delete('/txt2img/:id', requireAuth, async (req, res) => {

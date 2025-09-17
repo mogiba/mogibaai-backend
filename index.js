@@ -181,6 +181,11 @@ app.use("/api/payments/razorpay", paymentsRoute);
 // Replicate webhook must be raw; mount before global json parser is fine since we already used raw for RZP.
 const replicateWebhookRoute = require('./routes/replicateWebhookRoute');
 app.use('/api/replicate', replicateWebhookRoute);
+// Alias per spec: /api/webhooks/replicate
+try {
+  const { handleReplicateWebhook } = require('./routes/replicateWebhookRoute');
+  app.post('/api/webhooks/replicate', express.raw({ type: 'application/json' }), handleReplicateWebhook);
+} catch { }
 // New billing endpoints (minimal wrapper over payments/razorpay flows)
 const billingRoute = require("./routes/billingRoute");
 app.use("/api/billing", billingRoute);
@@ -190,10 +195,16 @@ app.use('/api', img2imgRoute);
 // Txt2Img routes (text inputs)
 const txt2imgRoute = require('./routes/txt2imgRoute');
 app.use('/api', txt2imgRoute);
+// Images route (delete etc.)
+const imagesRoute = require('./routes/imagesRoute');
+app.use('/api/images', imagesRoute);
 
 // Debug echo endpoints (POST /api/debug/echo)
 const debugRoute = require("./routes/debugRoute");
 app.use("/api/debug", debugRoute);
+
+const debugSmokeTestRoute = require("./routes/debugSmokeTestRoute");
+app.use("/api/debug", debugSmokeTestRoute);
 
 app.use("/api/text2img", textToImageRoutes);
 if (gptRoute) app.use("/api/gpt", gptRoute);

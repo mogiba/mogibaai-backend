@@ -31,12 +31,12 @@ async function withRetry(fn, { attempts = 3, baseMs = 500 } = {}) {
     throw err;
 }
 
-async function createPrediction({ version, input, webhook, webhook_events_filter }) {
+async function createPrediction({ version, input, webhook, webhook_events_filter, webhook_secret }) {
     const t = Date.now();
     try {
         const agent = getReplicateAgent();
         const { value: resp, attemptsUsed } = await withRetry(() => axios.post(`${API}/predictions`, {
-            version, input, webhook, webhook_events_filter,
+            version, input, webhook, webhook_events_filter, webhook_secret,
         }, {
             headers: { Authorization: `Token ${TOKEN}`, 'Content-Type': 'application/json' },
             timeout: 120000,

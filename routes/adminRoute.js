@@ -6,7 +6,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { db } = require('../utils/firebaseUtils');
+const { db, bucket, getSignedUrlForPath, admin } = require('../utils/firebaseUtils');
 const { getAuth } = require('firebase-admin/auth');
 const {
   getPendingDeletionItems,
@@ -303,3 +303,51 @@ router.get('/metrics', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+
+/**
+ * GET /api/admin/maintenance/backfill-gallery?uid=...
+ * Admin-only backfill: scans Storage at user-outputs/${uid}/** and creates missing docs under users/${uid}/images
+ */
+router.get('/maintenance/backfill-gallery', requireAdmin, async (req, res) => {
+  try {
+    const targetUid = (req.query.uid || '').toString().trim();
+    if (!targetUid) return res.status(400).json({ ok: false, error: 'MISSING_UID' });
+    if (!bucket) return res.status(500).json({ ok: false, error: 'NO_BUCKET' });
+
+    const prefix = `user-outputs/${targetUid}/`;
+    let pageToken = undefined; let created = 0; let scanned = 0;
+    const createdIds = [];
+    do {
+      const [files, nextQuery] = await bucket.getFiles({ prefix, autoPaginate: false, maxResults: 200, pageToken });
+      for (const f of files) {
+        scanned += 1;
+        const storagePath = f.name;
+        const ct = (f.metadata && f.metadata.contentType) || '';
+        if (ct && !ct.startsWith('image/')) continue;
+        const gid = storagePath.split('/').slice(-1)[0].replace(/\.[^.]+$/, '');
+        const ref = db.collection('users').doc(targetUid).collection('images').doc(gid);
+        const exist = await ref.get();
+        if (exist.exists) continue;
+        let signed = null; try { signed = await getSignedUrlForPath(storagePath); } catch { }
+        const createdAt = f.metadata && f.metadata.timeCreated ? new Date(f.metadata.timeCreated) : new Date();
+        await ref.set({
+          uid: targetUid,
+          jobId: null,
+          tool: 'text2img',
+          storagePath,
+          downloadURL: signed?.url || null,
+          caption: '', tags: [], visibility: 'private', status: 'approved',
+          size: null, aspect_ratio: null,
+          createdAt: admin.firestore.Timestamp.fromDate(createdAt),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        created += 1; createdIds.push(gid);
+      }
+      pageToken = nextQuery && nextQuery.pageToken;
+    } while (pageToken);
+
+    return res.json({ ok: true, scanned, created, createdIds });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'BACKFILL_FAILED', message: e?.message });
+  }
+});

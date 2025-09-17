@@ -194,3 +194,39 @@ module.exports.buildOwnerOutputPath = buildOwnerOutputPath;
 module.exports.buildPublicPath = buildPublicPath;
 module.exports.copyObject = copyObject;
 module.exports.deleteObject = deleteObject;
+
+/* ---------- New helpers: saveBufferToStorage & recordImageDoc ---------- */
+async function saveBufferToStorage({ buffer, contentType, storagePath }) {
+  if (!buffer || !storagePath) throw new Error('buffer and storagePath required');
+  if (!bucket) throw new Error('Storage bucket not configured');
+  const file = bucket.file(storagePath);
+  await file.save(buffer, {
+    metadata: { contentType: contentType || 'application/octet-stream' },
+    resumable: false,
+    public: false,
+    validation: false,
+  });
+  return { storagePath, sizeBytes: buffer.length };
+}
+
+async function recordImageDoc({ uid, jobId, storagePath, modelKey, size, aspect_ratio, prompt, width, height }) {
+  if (!uid || !storagePath) throw new Error('uid and storagePath are required');
+  const docData = {
+    uid,
+    jobId: jobId || null,
+    storagePath,
+    modelKey: modelKey || null,
+    size: size || null,
+    aspect_ratio: aspect_ratio || null,
+    prompt: prompt || '',
+    width: width || null,
+    height: height || null,
+    status: 'ready',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  const ref = await db.collection('images').add(docData);
+  return { id: ref.id, ...docData };
+}
+
+module.exports.saveBufferToStorage = saveBufferToStorage;
+module.exports.recordImageDoc = recordImageDoc;

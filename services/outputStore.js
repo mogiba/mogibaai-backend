@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const axios = require('axios');
 const { bucket, db, buildOwnerOutputPath, buildOwnerInputPath } = require('../utils/firebaseUtils');
+const { getReplicateAgent } = require('../lib/proxy');
 
 async function sha256(buf) {
     const h = crypto.createHash('sha256');
@@ -13,22 +14,30 @@ function buildFirebaseDownloadUrl(bucketName, storagePath, token) {
     return `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encPath}?alt=media${token ? `&token=${encodeURIComponent(token)}` : ''}`;
 }
 
-async function storeReplicateOutput({ uid, jobId, url, contentTypeHint }) {
+async function storeReplicateOutput({ uid, jobId, sourceUrl, index = 0, filename, contentTypeHint }) {
     try {
-        if (!url) throw new Error('missing url');
-        // Download file
-        const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000 });
+        if (!sourceUrl) throw new Error('missing url');
+        // Download file via Replicate-only proxy agent
+        const agent = getReplicateAgent();
+        const resp = await axios.get(sourceUrl, {
+            responseType: 'arraybuffer', timeout: 60000,
+            httpAgent: agent, httpsAgent: agent, proxy: false,
+            validateStatus: () => true,
+        });
+        if (resp.status >= 400 || !resp.data) {
+            return { ok: false, stored: false, error: `download_failed_${resp.status}`, sourceUrl };
+        }
         const buf = Buffer.from(resp.data);
         const ct = contentTypeHint || resp.headers['content-type'] || 'image/jpeg';
         const bytes = buf.length;
         const hash = await sha256(buf);
 
         if (!bucket) {
-            return { ok: true, stored: false, url, bytes, hash, reason: 'no_bucket' };
+            return { ok: true, stored: false, sourceUrl, bytes, hash, reason: 'no_bucket' };
         }
 
-        const ext = ct.includes('png') ? '.png' : ct.includes('webp') ? '.webp' : '.jpg';
-        const fileName = `${hash}${ext}`;
+        const ext = ct.includes('png') ? '.png' : ct.includes('webp') ? '.webp' : (ct.includes('jpeg') || ct.includes('jpg')) ? '.jpg' : '.bin';
+        const fileName = filename || `${jobId}_${index}${ext}`;
         const filePath = buildOwnerOutputPath(uid, jobId, fileName);
         const file = bucket.file(filePath);
         await file.save(buf, {
@@ -58,9 +67,10 @@ async function storeReplicateOutput({ uid, jobId, url, contentTypeHint }) {
             });
         } catch { /* non-fatal */ }
 
-        return { ok: true, stored: true, url: filePath, bytes, hash, storagePath: filePath };
+        console.log(`[finalize] stored ${filePath} (${bytes} bytes)`);
+        return { ok: true, stored: true, storagePath: filePath, bytes, contentType: ct, filename: fileName };
     } catch (e) {
-        return { ok: false, stored: false, url, error: e?.message || String(e) };
+        return { ok: false, stored: false, sourceUrl, error: e?.message || String(e) };
     }
 }
 

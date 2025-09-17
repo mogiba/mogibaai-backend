@@ -217,7 +217,13 @@ router.get('/img2img/:id', requireAuth, async (req, res) => {
     if (!FEATURE_REPLICATE_IMG2IMG) return res.status(503).json({ ok: false, error: 'feature_disabled' });
     const j = await jobs.getJob(req.params.id);
     if (!j || j.userId !== req.uid) return res.status(404).json({ ok: false, error: 'not_found' });
-    res.json({ ok: true, job: j });
+    let out = Array.isArray(j.output) ? j.output : [];
+    out = out.map((it) => {
+        if (typeof it === 'string') return { storagePath: it, filename: it.split('/').pop(), contentType: null, bytes: null };
+        const o = it || {};
+        return { storagePath: o.storagePath || null, filename: o.filename || (o.storagePath ? String(o.storagePath).split('/').pop() : null), contentType: o.contentType || null, bytes: o.bytes || null };
+    });
+    res.json({ ok: true, job: { ...j, output: out } });
 });
 
 router.delete('/img2img/:id', requireAuth, async (req, res) => {
@@ -237,7 +243,10 @@ router.post('/img2img/:id/share', requireAuth, async (req, res) => {
     const { fileIndex = 0 } = req.body || {};
     const outputs = Array.isArray(j.output) ? j.output : [];
     if (!outputs[fileIndex]) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'output index missing' });
-    const storagePath = outputs[fileIndex];
+    const outputItem = outputs[fileIndex];
+    const storagePath = typeof outputItem === 'string' ? outputItem : outputItem.storagePath;
+    if (!storagePath) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'storagePath missing from output' });
+
     // filename from storagePath
     const parts = String(storagePath).split('/');
     const filename = parts[parts.length - 1];
@@ -266,13 +275,16 @@ router.delete('/img2img/:id/file', requireAuth, async (req, res) => {
     const idx = Number(fileIndex || 0);
     const outputs = Array.isArray(j.output) ? j.output : [];
     if (!outputs[idx]) return res.status(400).json({ ok: false, error: 'INVALID_INPUT' });
+    const item = outputs[idx];
+    const storagePath = typeof item === 'string' ? item : (item && item.storagePath);
+    if (!storagePath) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'storagePath missing' });
     const { deleteObject } = require('../utils/firebaseUtils');
     try {
-        await deleteObject(outputs[idx]);
+        await deleteObject(storagePath);
         outputs.splice(idx, 1);
         await jobs.updateJob(j._id, { output: outputs });
         try {
-            const q = await db.collection('files').where('jobId', '==', j._id).where('storagePath', '==', outputs[idx]).limit(1).get();
+            const q = await db.collection('files').where('jobId', '==', j._id).where('storagePath', '==', storagePath).limit(1).get();
             if (!q.empty) await q.docs[0].ref.delete();
         } catch { }
         return res.json({ ok: true });

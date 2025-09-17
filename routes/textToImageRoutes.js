@@ -1,6 +1,8 @@
 const express = require("express");
 const axios = require("axios");
 const { HttpsProxyAgent } = require("https-proxy-agent");
+const { storeReplicateOutput } = require('../services/outputStore');
+const { recordImageDoc } = require('../utils/firebaseUtils');
 const { getDimensions } = require("../utils/sizeMapper");
 
 const router = express.Router();
@@ -87,7 +89,7 @@ async function ensureVersion(name, current, slug) {
  */
 router.post("/sdxl", async (req, res) => {
   try {
-    const { prompt, size = "1:1", quality = "standard", negativePrompt = "", seed = "" } = req.body;
+    const { prompt, size = "1:1", quality = "standard", negativePrompt = "", seed = "", uid = null } = req.body;
     const { width, height } = getDimensions(size, quality);
 
     const output = await createAndPoll({
@@ -109,6 +111,16 @@ router.post("/sdxl", async (req, res) => {
     });
 
     const imageUrl = Array.isArray(output) && output.length > 0 ? output[0] : null;
+    // Persist to Storage + Firestore (legacy path)
+    if (uid && imageUrl) {
+      try {
+        const jobId = `legacy_${Date.now()}`;
+        const stored = await storeReplicateOutput({ uid, jobId, sourceUrl: imageUrl, index: 0 });
+        if (stored && stored.ok && stored.stored) {
+          await recordImageDoc({ uid, jobId, storagePath: stored.storagePath, modelKey: 'sdxl', size, aspect_ratio: size, prompt, width, height });
+        }
+      } catch (_) { /* best effort */ }
+    }
     res.json({ imageUrl });
   } catch (error) {
     const detail = error?.response?.data || error.message || error;
@@ -125,7 +137,7 @@ router.post("/sdxl", async (req, res) => {
 router.post("/wan-2.2", async (req, res) => {
   try {
     const version = await ensureVersion("WAN22", WAN22_VERSION, WAN22_SLUG);
-    const { prompt, size = "1:1", megapixels = 1, juiced = false, output_format = "jpg", output_quality = 80, seed = "" } = req.body;
+    const { prompt, size = "1:1", megapixels = 1, juiced = false, output_format = "jpg", output_quality = 80, seed = "", uid = null } = req.body;
 
     const output = await createAndPoll({
       version,
@@ -141,6 +153,15 @@ router.post("/wan-2.2", async (req, res) => {
     });
 
     const finalUrl = Array.isArray(output) ? output[0] : typeof output === "string" ? output : null;
+    if (uid && finalUrl) {
+      try {
+        const jobId = `legacy_${Date.now()}`;
+        const stored = await storeReplicateOutput({ uid, jobId, sourceUrl: finalUrl, index: 0 });
+        if (stored && stored.ok && stored.stored) {
+          await recordImageDoc({ uid, jobId, storagePath: stored.storagePath, modelKey: 'wan-2.2', size, aspect_ratio: size, prompt });
+        }
+      } catch (_) { }
+    }
     res.json({ imageUrl: finalUrl });
   } catch (error) {
     const detail = error?.response?.data || error.message || error;
@@ -157,7 +178,7 @@ router.post("/wan-2.2", async (req, res) => {
 router.post("/seedream-3", async (req, res) => {
   try {
     const version = await ensureVersion("SEEDREAM3", SEEDREAM3_VERSION, SEEDREAM3_SLUG);
-    const { prompt, size = "1:1", quality = "standard", seed = "" } = req.body;
+    const { prompt, size = "1:1", quality = "standard", seed = "", uid = null } = req.body;
     const { width, height } = getDimensions(size, quality);
 
     const output = await createAndPoll({
@@ -172,6 +193,15 @@ router.post("/seedream-3", async (req, res) => {
     });
 
     const finalUrl = Array.isArray(output) ? output[0] : typeof output === "string" ? output : null;
+    if (uid && finalUrl) {
+      try {
+        const jobId = `legacy_${Date.now()}`;
+        const stored = await storeReplicateOutput({ uid, jobId, sourceUrl: finalUrl, index: 0 });
+        if (stored && stored.ok && stored.stored) {
+          await recordImageDoc({ uid, jobId, storagePath: stored.storagePath, modelKey: 'seedream-3', size, aspect_ratio: size, prompt, width, height });
+        }
+      } catch (_) { }
+    }
     res.json({ imageUrl: finalUrl });
   } catch (error) {
     const detail = error?.response?.data || error.message || error;
@@ -188,7 +218,7 @@ router.post("/seedream-3", async (req, res) => {
 router.post("/nano-banana", async (req, res) => {
   try {
     const version = await ensureVersion("NANOBANANA", NANOBANANA_VERSION, NANOBANANA_SLUG);
-    const { prompt, size = "1:1", quality = "standard", seed = "" } = req.body;
+    const { prompt, size = "1:1", quality = "standard", seed = "", uid = null } = req.body;
     const { width, height } = getDimensions(size, quality);
 
     const output = await createAndPoll({
@@ -202,6 +232,15 @@ router.post("/nano-banana", async (req, res) => {
     });
 
     const finalUrl = Array.isArray(output) ? output[0] : typeof output === "string" ? output : null;
+    if (uid && finalUrl) {
+      try {
+        const jobId = `legacy_${Date.now()}`;
+        const stored = await storeReplicateOutput({ uid, jobId, sourceUrl: finalUrl, index: 0 });
+        if (stored && stored.ok && stored.stored) {
+          await recordImageDoc({ uid, jobId, storagePath: stored.storagePath, modelKey: 'nano-banana', size, aspect_ratio: size, prompt, width, height });
+        }
+      } catch (_) { }
+    }
     res.json({ imageUrl: finalUrl });
   } catch (error) {
     const detail = error?.response?.data || error.message || error;
