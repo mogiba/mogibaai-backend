@@ -1,6 +1,6 @@
 const express = require("express");
 const axios = require("axios");
-const { HttpsProxyAgent } = require("https-proxy-agent");
+const { getReplicateAgent } = require('../lib/proxy');
 const { storeReplicateOutput } = require('../services/outputStore');
 const { recordImageDoc } = require('../utils/firebaseUtils');
 const { getDimensions } = require("../utils/sizeMapper");
@@ -15,15 +15,16 @@ if (!REPLICATE_TOKEN) {
   console.warn("[Warn] REPLICATE_API_TOKEN not set – Replicate routes will fail.");
 }
 
-// Fixie / corporate proxy support
-const PROXY_URL = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
-const proxyAgent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined;
+// Fixie / corporate proxy support (unified via getReplicateAgent -> supports FIXIE_URL/HTTPS_PROXY/HTTP_PROXY)
+const proxyAgent = getReplicateAgent();
 
 const replicateHttp = axios.create({
   baseURL: "https://api.replicate.com/v1",
   headers: {
-    Authorization: `Bearer ${REPLICATE_TOKEN}`,
+    Authorization: `Token ${REPLICATE_TOKEN}`,
     "Content-Type": "application/json",
+    Accept: "application/json",
+    "User-Agent": "mogibaai-backend/1.0",
   },
   httpAgent: proxyAgent,
   httpsAgent: proxyAgent,

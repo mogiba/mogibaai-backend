@@ -166,6 +166,9 @@ const adminRoute = require("./routes/adminRoute");
 app.get("/health", (req, res) =>
   res.json({ status: "ok", message: "Backend is live!" }),
 );
+app.get("/api/health", (req, res) =>
+  res.json({ status: "ok", message: "Backend is live! (api/health)" }),
+);
 app.get("/", (req, res) => res.send("Mogibaa backend is running!"));
 
 // Features discovery for frontend gating
