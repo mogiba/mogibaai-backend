@@ -11,10 +11,13 @@ const router = express.Router();
 async function handleReplicateWebhook(req, res) {
     const sig = req.headers['x-replicate-signature'] || '';
     const raw = req.body;
-    if (!rpl.verifyWebhookSignature(raw, sig)) return res.status(401).send('invalid signature');
+    if (!rpl.verifyWebhookSignature(raw, sig)) {
+        console.warn('[replicate.webhook] invalid signature');
+        return res.status(401).send('invalid signature');
+    }
 
     let evt = null;
-    try { evt = JSON.parse(raw.toString('utf8')); } catch { return res.status(200).send('ok'); }
+    try { evt = JSON.parse(raw.toString('utf8')); } catch (e) { console.warn('[replicate.webhook] JSON parse failed', e && e.message); return res.status(200).send('ok'); }
 
     const pred = evt || {};
     const id = pred?.id || '';
@@ -28,11 +31,15 @@ async function handleReplicateWebhook(req, res) {
     } else {
         jobSnap = await db.collection('jobs').where('providerPredictionId', '==', id).limit(1).get();
     }
-    if (jobSnap.empty) return res.status(200).send('ok');
+    if (jobSnap.empty) {
+        console.warn('[replicate.webhook] job not found for prediction', { predictionId: id, queryJob });
+        return res.status(200).send('ok');
+    }
     const doc = jobSnap.docs[0];
     const job = doc.data();
 
     // idempotent state machine
+    console.log('[replicate.webhook] received', { id, status, outputs: output.length, jobId: job._id, uid: job.userId });
     if (status === 'succeeded') {
         // Persist output to our storage; replace with storage metadata
         const outs = Array.isArray(output) ? output : [];
@@ -66,7 +73,7 @@ async function handleReplicateWebhook(req, res) {
                         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
                     }, { merge: true });
                     galleryDocs.push(gid);
-                } catch (_) { }
+                } catch (e) { console.warn('[replicate.webhook] gallery write failed', e && e.message); }
                 // Optional: keep top-level images index (best-effort)
                 try {
                     await recordImageDoc({
@@ -80,7 +87,7 @@ async function handleReplicateWebhook(req, res) {
                         width: job?.input?.width || null,
                         height: job?.input?.height || null,
                     });
-                } catch (_) { /* non-fatal */ }
+                } catch (e) { console.warn('[replicate.webhook] recordImageDoc failed', e && e.message); }
             } else {
                 // best-effort: keep a placeholder with source URL but no public URL
                 storedOutputs.push({ storagePath: null, filename: null, contentType: null, bytes: 0 });

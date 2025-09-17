@@ -104,7 +104,11 @@ function verifyWebhookSignature(rawBody, signatureHeader) {
         const h = crypto.createHmac('sha256', WEBHOOK_SECRET);
         h.update(rawBody);
         const digest = h.digest('hex');
-        return digest === String(signatureHeader || '').toLowerCase();
+        let sig = String(signatureHeader || '').trim();
+        // Accept common formats like "sha256=..."
+        if (sig.toLowerCase().startsWith('sha256=')) sig = sig.slice(7);
+        sig = sig.toLowerCase();
+        return digest === sig;
     } catch { return false; }
 }
 
