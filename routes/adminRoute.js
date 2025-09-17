@@ -351,3 +351,20 @@ router.get('/maintenance/backfill-gallery', requireAdmin, async (req, res) => {
     return res.status(500).json({ ok: false, error: 'BACKFILL_FAILED', message: e?.message });
   }
 });
+
+/**
+ * POST /api/admin/finalize
+ * body: { uid, jobId, predId }
+ * Admin only — triggers the finalizer worker once.
+ */
+router.post('/finalize', requireAdmin, express.json(), async (req, res) => {
+  try {
+    const { uid, jobId, predId } = req.body || {};
+    if (!uid || !jobId || !predId) return res.status(400).json({ ok: false, error: 'MISSING_PARAMS' });
+    const { finalizePrediction } = require('../workers/finalizer');
+    const out = await finalizePrediction({ uid, jobId, predId });
+    return res.json({ ok: true, result: out });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});

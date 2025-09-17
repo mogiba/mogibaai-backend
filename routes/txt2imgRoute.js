@@ -180,8 +180,16 @@ router.post('/txt2img', requireAuth, async (req, res) => {
         const { data, latencyMs, attemptsUsed } = await rpl.createPrediction({ version: useVersion, input: replicateInput, webhook, webhook_events_filter: ['completed'], webhook_secret });
         await jobs.updateJob(job._id, { status: 'running', provider: 'replicate', providerPredictionId: data.id, metrics: { createLatencyMs: latencyMs, replicateCreateAttempts: attemptsUsed }, modelResolvedVersion: useVersion });
         try { await db.collection('imageGenerations').doc(job._id).set({ replicatePredictionId: data.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }); } catch { }
+        // Detach finalizer worker (polls replicate and stores outputs)
+        try {
+            const { finalizePrediction } = require('../workers/finalizer');
+            setImmediate(() => finalizePrediction({ uid, jobId: job._id, predId: data.id }).catch(console.error));
+            console.log('[txt2img] queued finalizer', { predId: data.id });
+        } catch (e) {
+            console.warn('[txt2img] finalizer enqueue failed', e && e.message);
+        }
         logJSON('txt2img.queued', { uid, jobId: job._id, model: modelKey, version: useVersion });
-        return res.json({ ok: true, jobId: job._id, env: ENV });
+        return res.json({ ok: true, jobId: job._id, predId: data.id, env: ENV });
     } catch (e) {
         const code = e?.status || e?.response?.status || 500;
         const body = e?.body || e?.response?.data || e?.message;
