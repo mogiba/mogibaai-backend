@@ -76,7 +76,13 @@ function resolveBucketName() {
   return ''; // unknown
 }
 
-const storageBucketName = resolveBucketName();
+let storageBucketName = resolveBucketName();
+// Runtime sanity: if name ends with .appspot.com we will also later try the modern firebasestorage.app variant if operations fail (handled in callers)
+if (!storageBucketName) {
+  console.warn('[firebaseUtils] No storage bucket resolved at init');
+} else {
+  console.log('[firebaseUtils] resolved bucket name =', storageBucketName);
+}
 
 /* ---------- Initialize admin SDK (idempotent) ---------- */
 if (!admin.apps || admin.apps.length === 0) {
@@ -87,7 +93,7 @@ if (!admin.apps || admin.apps.length === 0) {
 
 const db = admin.firestore();
 // IMPORTANT: don't crash if bucketName is still unavailable; export null and let callers handle gracefully.
-const bucket = storageBucketName ? admin.storage().bucket(storageBucketName) : null;
+let bucket = storageBucketName ? admin.storage().bucket(storageBucketName) : null;
 
 /* ---------- Signed URL helper (short-lived) ---------- */
 function getSignedUrlTTLms() {

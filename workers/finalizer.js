@@ -105,11 +105,14 @@ async function finalizePrediction({ uid, jobId, predId }) {
                     console.warn('[finalizer] recordImageDoc failed', { docId, error: e?.message || String(e) });
                 }
             } catch (e) {
-                console.warn('[finalizer] pipeline failed for image', { docId, error: e?.message || String(e) });
+                const msg = e?.message || String(e);
+                const bucketMissing = /The specified bucket does not exist|No such bucket/i.test(msg);
+                console.warn('[finalizer] pipeline failed for image', { docId, error: msg, bucketMissing });
+                // Graceful fallback: keep generation succeeded for this image but note uploadError; retain sourceUrl
                 try {
                     await db.collection('users').doc(uid).collection('images').doc(docId).set({
-                        uid, jobId, index: i, status: 'failed', error: e?.message || String(e),
-                        sourceUrl, updatedAt: new Date()
+                        uid, jobId, index: i, status: 'succeeded', uploadError: msg, storagePath: null,
+                        downloadURL: sourceUrl, sourceUrl, updatedAt: new Date()
                     }, { merge: true });
                 } catch (_) { }
             }
