@@ -2,8 +2,30 @@ const { db, getSignedUrlForPath, admin } = require('../utils/firebaseUtils');
 const { /* storeReplicateOutput */ } = require('../services/outputStore');
 const { getPrediction, setReplicateLogContext } = require('../services/replicateService');
 // replicateUtils may be an ES module default export or a CJS export.
-const _replicateUtils = require('../../lib/replicateUtils.cjs');
-const normalizeOutputUrls = (_replicateUtils && (_replicateUtils.normalizeOutputUrls || _replicateUtils.default || _replicateUtils));
+let normalizeOutputUrls = null;
+const candidatePaths = [
+    '../../lib/replicateUtils.cjs',
+    '../../lib/replicateUtils.js',
+    '../lib/replicateUtils.cjs',
+    '../lib/replicateUtils.js',
+    './replicateUtils.cjs',
+    './replicateUtils.js'
+];
+for (const p of candidatePaths) {
+    if (normalizeOutputUrls) break;
+    try {
+        const mod = require(p);
+        const fn = (mod && (mod.normalizeOutputUrls || mod.default || mod));
+        if (typeof fn === 'function') {
+            normalizeOutputUrls = fn;
+            console.log('[finalizer] loaded replicateUtils from', p);
+            break;
+        }
+    } catch (_) { /* ignore */ }
+}
+if (!normalizeOutputUrls) {
+    console.warn('[finalizer] replicateUtils not found in any candidate path; using fallback extraction');
+}
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
