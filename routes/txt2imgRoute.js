@@ -171,13 +171,15 @@ router.post('/txt2img', requireAuth, async (req, res) => {
             console.warn('[txt2img] placeholder creation failed', e && e.message);
         }
         const base = (process.env.PUBLIC_API_BASE || '').replace(/\/$/, '');
-        const webhook = `${base}/api/webhooks/replicate?uid=${encodeURIComponent(uid)}&jobId=${encodeURIComponent(job._id)}`;
-        const webhook_secret = process.env.REPLICATE_WEBHOOK_SECRET || '';
+        let webhook = null;
+        if (base && base.startsWith('https://')) {
+            webhook = `${base}/api/webhooks/replicate?uid=${encodeURIComponent(uid)}&jobId=${encodeURIComponent(job._id)}`;
+        }
         console.log('[txt2img] job created', { jobId: job._id, webhook });
         if (typeof rpl.setReplicateLogContext === 'function') rpl.setReplicateLogContext(() => ({ uid, jobId: job._id, modelKey, modelVersion: model.version }));
         // Use pinned version from config; do not resolve dynamically
         const useVersion = model.version;
-        const { data, latencyMs, attemptsUsed } = await rpl.createPrediction({ version: useVersion, input: replicateInput, webhook, webhook_events_filter: ['completed'], webhook_secret });
+        const { data, latencyMs, attemptsUsed } = await rpl.createPrediction({ version: useVersion, input: replicateInput, webhook, webhook_events_filter: ['completed'] });
         await jobs.updateJob(job._id, { status: 'running', provider: 'replicate', providerPredictionId: data.id, metrics: { createLatencyMs: latencyMs, replicateCreateAttempts: attemptsUsed }, modelResolvedVersion: useVersion });
         try { await db.collection('imageGenerations').doc(job._id).set({ replicatePredictionId: data.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }); } catch { }
         // Detach finalizer worker (polls replicate and stores outputs)

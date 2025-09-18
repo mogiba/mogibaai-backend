@@ -184,7 +184,8 @@ router.post('/img2img', requireAuth, upload.single('file'), async (req, res) => 
         const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: { ...input, image: imageUrl }, cost, postprocess });
 
         // Create Replicate prediction with webhook
-        const webhookUrl = (process.env.PUBLIC_API_BASE || '').replace(/\/$/, '') + '/api/replicate/webhook';
+        const base = (process.env.PUBLIC_API_BASE || '').replace(/\/$/, '');
+        const webhookUrl = (base && base.startsWith('https://')) ? (base + '/api/replicate/webhook') : null;
         // attach logging context for Replicate calls
         if (typeof rpl.setReplicateLogContext === 'function') {
             rpl.setReplicateLogContext(() => ({ requestId, uid, jobId: job._id, modelKey, modelVersion: model.version }));
@@ -192,7 +193,7 @@ router.post('/img2img', requireAuth, upload.single('file'), async (req, res) => 
         const { data, latencyMs, attemptsUsed } = await rpl.createPrediction({
             version: model.version,
             input: { ...input, image: imageUrl },
-            webhook: webhookUrl,
+            webhook: webhookUrl || undefined,
             webhook_events_filter: ['completed'],
         });
 
