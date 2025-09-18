@@ -69,17 +69,40 @@ async function finalizePrediction({ uid, jobId, predId }) {
             return { ok: false, reason: 'no_outputs' };
         }
 
+        console.log('[finalizer] begin image doc writes', { uid, jobId, count: urls.length });
         for (let i = 0; i < urls.length; i++) {
-            await db.collection('users').doc(uid).collection('images').doc(`${jobId}-${i}`).set({
-                uid, jobId, index: i, status: 'succeeded', visibility: 'private',
-                storagePath: null, downloadURL: urls[i],
-                updatedAt: new Date(),
-            }, { merge: true });
+            const docId = `${jobId}-${i}`;
+            const url = urls[i];
+            try {
+                console.log('[finalizer] writing user image doc', { docId, url });
+                await db.collection('users').doc(uid).collection('images').doc(docId).set({
+                    uid, jobId, index: i, status: 'succeeded', visibility: 'private',
+                    storagePath: null, downloadURL: url,
+                    updatedAt: new Date(),
+                }, { merge: true });
+                console.log('[finalizer] wrote user image doc', { docId });
+            } catch (e) {
+                console.warn('[finalizer] failed writing user image doc', { docId, error: e?.message || String(e) });
+            }
+            // Attempt gallery indexing (recordImageDoc) using ephemeral URL (will be replaced later if stored)
+            try {
+                const { recordImageDoc } = require('../utils/firebaseUtils');
+                await recordImageDoc({ uid, jobId, storagePath: url, modelKey: 'seedream4', prompt: (pred?.input?.prompt) || '', size: null, aspect_ratio: null });
+                console.log('[finalizer] recordImageDoc ok', { docId });
+            } catch (e) {
+                console.warn('[finalizer] recordImageDoc failed', { error: e?.message || String(e) });
+            }
         }
 
         // Update outputsCount once on first image doc and imageGenerations
-        try { await db.collection('users').doc(uid).collection('images').doc(`${jobId}-0`).set({ outputsCount: urls.length, updatedAt: new Date() }, { merge: true }); } catch { }
-        await db.collection('imageGenerations').doc(jobId).set({ status: 'succeeded', outputsCount: urls.length, updatedAt: new Date() }, { merge: true });
+        try {
+            console.log('[finalizer] setting outputsCount on first image doc', { jobId, outputs: urls.length });
+            await db.collection('users').doc(uid).collection('images').doc(`${jobId}-0`).set({ outputsCount: urls.length, updatedAt: new Date() }, { merge: true });
+        } catch (e) { console.warn('[finalizer] failed setting outputsCount on first image doc', e?.message || String(e)); }
+        try {
+            console.log('[finalizer] updating imageGenerations doc', { jobId, outputs: urls.length });
+            await db.collection('imageGenerations').doc(jobId).set({ status: 'succeeded', outputsCount: urls.length, updatedAt: new Date() }, { merge: true });
+        } catch (e) { console.warn('[finalizer] failed updating imageGenerations doc', e?.message || String(e)); }
 
         console.log('[finalizer] stored', { uid, jobId, outputs: urls.length });
         console.log('[finalizer] wrote', { uid, jobId, count: urls.length });
