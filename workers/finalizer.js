@@ -90,12 +90,36 @@ async function finalizePrediction({ uid, jobId, predId }) {
                     try { const su = await getSignedUrlForPath(storagePath); signed = su?.url || null; } catch { signed = null; }
                 }
                 await db.collection('users').doc(uid).collection('images').doc(docId).set({
-                    uid, jobId, index: i, status: 'succeeded', visibility: 'private',
-                    storagePath: bucket ? storagePath : null, downloadURL: signed || sourceUrl,
+                    uid,
+                    jobId,
+                    index: i,
+                    status: 'succeeded',
+                    visibility: 'private',
+                    storagePath: bucket ? storagePath : null,
+                    downloadURL: signed || sourceUrl,
                     sourceUrl,
+                    // Provide prompt & model metadata for UI (GalleryPanel reads prompt/modelKey/tool)
+                    prompt: (pred?.input?.prompt) || '',
+                    modelKey: (pred?.model || 'seedream4'),
+                    // createdAt needed because GalleryPanel orders by createdAt; without it docs are excluded
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     updatedAt: new Date(),
                 }, { merge: true });
                 console.log('[finalizer] wrote user image doc', { docId, storagePath: bucket ? storagePath : null });
+                // Also write to legacy userGallery collection (if front-end or other code still expects it)
+                try {
+                    await db.collection('userGallery').doc(uid).collection('images').doc(docId).set({
+                        uid,
+                        jobId,
+                        status: 'succeeded',
+                        storagePath: bucket ? storagePath : null,
+                        url: signed || sourceUrl,
+                        prompt: (pred?.input?.prompt) || '',
+                        tool: (pred?.model || 'seedream4'),
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    }, { merge: true });
+                } catch (e) { console.warn('[finalizer] failed writing legacy userGallery doc', { docId, error: e?.message || String(e) }); }
                 // Index into global images collection with storagePath (or fallback to sourceUrl)
                 try {
                     const { recordImageDoc } = require('../utils/firebaseUtils');
@@ -111,9 +135,33 @@ async function finalizePrediction({ uid, jobId, predId }) {
                 // Graceful fallback: keep generation succeeded for this image but note uploadError; retain sourceUrl
                 try {
                     await db.collection('users').doc(uid).collection('images').doc(docId).set({
-                        uid, jobId, index: i, status: 'succeeded', uploadError: msg, storagePath: null,
-                        downloadURL: sourceUrl, sourceUrl, updatedAt: new Date()
+                        uid,
+                        jobId,
+                        index: i,
+                        status: 'succeeded',
+                        uploadError: msg,
+                        storagePath: null,
+                        downloadURL: sourceUrl,
+                        sourceUrl,
+                        prompt: (pred?.input?.prompt) || '',
+                        modelKey: (pred?.model || 'seedream4'),
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        updatedAt: new Date()
                     }, { merge: true });
+                    try {
+                        await db.collection('userGallery').doc(uid).collection('images').doc(docId).set({
+                            uid,
+                            jobId,
+                            status: 'succeeded',
+                            storagePath: null,
+                            url: sourceUrl,
+                            prompt: (pred?.input?.prompt) || '',
+                            tool: (pred?.model || 'seedream4'),
+                            uploadError: msg,
+                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        }, { merge: true });
+                    } catch (e2) { console.warn('[finalizer] failed writing legacy userGallery doc (fallback)', { docId, error: e2?.message || String(e2) }); }
                 } catch (_) { }
             }
         }
