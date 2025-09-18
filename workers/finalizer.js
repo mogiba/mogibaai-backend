@@ -1,6 +1,9 @@
 const { db, getSignedUrlForPath, admin } = require('../utils/firebaseUtils');
-const { storeReplicateOutput } = require('../services/outputStore');
+const { /* storeReplicateOutput */ } = require('../services/outputStore');
 const { getPrediction, setReplicateLogContext } = require('../services/replicateService');
+// replicateUtils may be an ES module default export or a CJS export.
+const _replicateUtils = require('../../lib/replicateUtils.cjs');
+const normalizeOutputUrls = (_replicateUtils && (_replicateUtils.normalizeOutputUrls || _replicateUtils.default || _replicateUtils));
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -37,29 +40,28 @@ async function finalizePrediction({ uid, jobId, predId }) {
             return { ok: false, status };
         }
 
-        const outs = Array.isArray(pred.output) ? pred.output : (pred.output ? [pred.output] : []);
-        const stored = [];
-        for (let i = 0; i < outs.length; i++) {
-            const r = await storeReplicateOutput({ uid, jobId, sourceUrl: outs[i], index: i });
-            if (r && r.ok && r.stored) {
-                let signed = null; try { signed = await getSignedUrlForPath(r.storagePath); } catch { signed = null; }
-                await db.collection('users').doc(uid).collection('images').doc(`${jobId}-${i}`).set({
-                    uid, jobId, index: i, status: 'succeeded', visibility: 'private',
-                    storagePath: r.storagePath, downloadURL: signed?.url || null,
-                    updatedAt: new Date(),
-                }, { merge: true });
-                stored.push({ storagePath: r.storagePath, filename: r.filename, contentType: r.contentType, bytes: r.bytes });
-            } else {
-                await db.collection('users').doc(uid).collection('images').doc(`${jobId}-${i}`).set({ status: 'failed', updatedAt: new Date() }, { merge: true });
-            }
+        // Normalize outputs into direct URLs (no Storage upload)
+        const urls = (typeof normalizeOutputUrls === 'function') ? normalizeOutputUrls(pred) : (Array.isArray(pred.output) ? pred.output : (pred.output ? [pred.output] : []));
+        if (!urls || !urls.length) {
+            await db.collection('imageGenerations').doc(jobId).set({ status: 'failed', error: 'no_outputs', updatedAt: new Date() }, { merge: true });
+            return { ok: false, reason: 'no_outputs' };
+        }
+
+        for (let i = 0; i < urls.length; i++) {
+            await db.collection('users').doc(uid).collection('images').doc(`${jobId}-${i}`).set({
+                uid, jobId, index: i, status: 'succeeded', visibility: 'private',
+                storagePath: null, downloadURL: urls[i],
+                updatedAt: new Date(),
+            }, { merge: true });
         }
 
         // Update outputsCount once on first image doc and imageGenerations
-        try { await db.collection('users').doc(uid).collection('images').doc(`${jobId}-0`).set({ outputsCount: outs.length, updatedAt: new Date() }, { merge: true }); } catch { }
-        await db.collection('imageGenerations').doc(jobId).set({ status: 'succeeded', outputsCount: outs.length, updatedAt: new Date() }, { merge: true });
+        try { await db.collection('users').doc(uid).collection('images').doc(`${jobId}-0`).set({ outputsCount: urls.length, updatedAt: new Date() }, { merge: true }); } catch { }
+        await db.collection('imageGenerations').doc(jobId).set({ status: 'succeeded', outputsCount: urls.length, updatedAt: new Date() }, { merge: true });
 
-        console.log('[finalizer] stored', { uid, jobId, outputs: outs.length });
-        return { ok: true, outputs: outs.length };
+        console.log('[finalizer] stored', { uid, jobId, outputs: urls.length });
+        console.log('[finalizer] wrote', { uid, jobId, count: urls.length });
+        return { ok: true, outputs: urls.length };
     } catch (e) {
         await db.collection('imageGenerations').doc(jobId).set({ status: 'failed', error: e?.message || String(e), updatedAt: new Date() }, { merge: true });
         return { ok: false, error: e?.message || String(e) };

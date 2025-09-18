@@ -15,9 +15,21 @@ const {
   autoDeletePending,
 } = require('../utils/deleteUtils');
 
-// ===== Strict admin guard (ID token required)
+// ===== Strict admin guard (ID token required, with optional internal secret fallback for testing)
 async function requireAdmin(req, res, next) {
   try {
+    // Optional internal-admin secret for CI/testing (ONLY if explicitly configured)
+    try {
+      const adminSecret = (process.env.ADMIN_INTERNAL_SECRET || '').toString();
+      const provided = (req.headers['x-internal-admin-secret'] || req.headers['x-internal-secret'] || '').toString();
+      if (adminSecret && provided && adminSecret === provided) {
+        const fallbackUid = (req.headers['x-uid'] || req.query?.uid || req.body?.uid || 'internal-admin').toString();
+        req.adminUid = fallbackUid;
+        req.decodedToken = { uid: fallbackUid, admin: true, customClaims: { admin: true }, iss: 'internal' };
+        return next();
+      }
+    } catch (_) { /* ignore and continue to token path */ }
+
     const authHeader = String(req.headers['authorization'] || '').trim();
     if (!authHeader.toLowerCase().startsWith('bearer ')) {
       return res.status(401).json({ error: 'MISSING_ID_TOKEN' });

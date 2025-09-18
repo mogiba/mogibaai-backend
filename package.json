@@ -4,7 +4,10 @@
   "main": "upload.js",
   "scripts": {
     "test": "jest --passWithNoTests",
-    "start": "node index.js"
+    "start": "node index.js",
+    "postman:health": "node ../scripts/run-postman.mjs --mode=health",
+    "postman:finalize": "node ../scripts/run-postman.mjs --mode=finalize",
+    "postman:smoke": "node ../scripts/smoke-e2e.mjs"
   },
   "keywords": [],
   "author": "",
@@ -30,5 +33,10 @@
     "replicate": "^1.1.0",
     "jest": "^29.7.0",
     "supertest": "^7.0.0"
+  },
+  "devDependencies": {
+    "newman": "^6",
+    "firebase-admin": "^12",
+    "node-fetch": "^3"
   }
 }
