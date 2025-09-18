@@ -1,4 +1,5 @@
-const { db, getSignedUrlForPath, admin } = require('../utils/firebaseUtils');
+const { db, getSignedUrlForPath, admin, bucket, buildOwnerOutputPath } = require('../utils/firebaseUtils');
+const axios = require('axios');
 const { /* storeReplicateOutput */ } = require('../services/outputStore');
 const { getPrediction, setReplicateLogContext } = require('../services/replicateService');
 // replicateUtils may be an ES module default export or a CJS export.
@@ -69,28 +70,48 @@ async function finalizePrediction({ uid, jobId, predId }) {
             return { ok: false, reason: 'no_outputs' };
         }
 
-        console.log('[finalizer] begin image doc writes', { uid, jobId, count: urls.length });
+        console.log('[finalizer] begin image download+upload pipeline', { uid, jobId, count: urls.length });
         for (let i = 0; i < urls.length; i++) {
+            const sourceUrl = urls[i];
+            const fileName = `${jobId}-${i}.png`;
+            const storagePath = buildOwnerOutputPath(uid, jobId, fileName);
             const docId = `${jobId}-${i}`;
-            const url = urls[i];
+            let signed = null;
             try {
-                console.log('[finalizer] writing user image doc', { docId, url });
+                console.log('[finalizer] downloading source image', { index: i, sourceUrl });
+                const resp = await axios.get(sourceUrl, { responseType: 'arraybuffer', timeout: 60000, validateStatus: () => true });
+                if (resp.status >= 400) throw new Error('download_failed_' + resp.status);
+                const buf = Buffer.from(resp.data);
+                if (!bucket) {
+                    console.warn('[finalizer] bucket missing, skipping upload, will store raw url only');
+                } else {
+                    const file = bucket.file(storagePath);
+                    await file.save(buf, { metadata: { contentType: resp.headers['content-type'] || 'image/png' }, resumable: false, public: false, validation: false });
+                    try { const su = await getSignedUrlForPath(storagePath); signed = su?.url || null; } catch { signed = null; }
+                }
                 await db.collection('users').doc(uid).collection('images').doc(docId).set({
                     uid, jobId, index: i, status: 'succeeded', visibility: 'private',
-                    storagePath: null, downloadURL: url,
+                    storagePath: bucket ? storagePath : null, downloadURL: signed || sourceUrl,
+                    sourceUrl,
                     updatedAt: new Date(),
                 }, { merge: true });
-                console.log('[finalizer] wrote user image doc', { docId });
+                console.log('[finalizer] wrote user image doc', { docId, storagePath: bucket ? storagePath : null });
+                // Index into global images collection with storagePath (or fallback to sourceUrl)
+                try {
+                    const { recordImageDoc } = require('../utils/firebaseUtils');
+                    await recordImageDoc({ uid, jobId, storagePath: bucket ? storagePath : sourceUrl, modelKey: 'seedream4', prompt: (pred?.input?.prompt) || '', size: null, aspect_ratio: null });
+                    console.log('[finalizer] recordImageDoc ok', { docId });
+                } catch (e) {
+                    console.warn('[finalizer] recordImageDoc failed', { docId, error: e?.message || String(e) });
+                }
             } catch (e) {
-                console.warn('[finalizer] failed writing user image doc', { docId, error: e?.message || String(e) });
-            }
-            // Attempt gallery indexing (recordImageDoc) using ephemeral URL (will be replaced later if stored)
-            try {
-                const { recordImageDoc } = require('../utils/firebaseUtils');
-                await recordImageDoc({ uid, jobId, storagePath: url, modelKey: 'seedream4', prompt: (pred?.input?.prompt) || '', size: null, aspect_ratio: null });
-                console.log('[finalizer] recordImageDoc ok', { docId });
-            } catch (e) {
-                console.warn('[finalizer] recordImageDoc failed', { error: e?.message || String(e) });
+                console.warn('[finalizer] pipeline failed for image', { docId, error: e?.message || String(e) });
+                try {
+                    await db.collection('users').doc(uid).collection('images').doc(docId).set({
+                        uid, jobId, index: i, status: 'failed', error: e?.message || String(e),
+                        sourceUrl, updatedAt: new Date()
+                    }, { merge: true });
+                } catch (_) { }
             }
         }
 
