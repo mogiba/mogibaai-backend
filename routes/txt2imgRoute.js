@@ -62,7 +62,13 @@ router.post('/txt2img', requireAuth, async (req, res) => {
         // model allowlist check (version will be resolved dynamically for seedream4)
         if (MODELS[modelKey]) version = MODELS[modelKey].version;
         const model = getModel(modelKey, version || MODELS[modelKey]?.version);
-        if (!model) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'model/version not allowed' });
+        if (!model) {
+            const exists = !!MODELS[modelKey];
+            const enabled = exists ? MODELS[modelKey].enabled : false;
+            const msg = exists && !enabled ? 'model disabled' : 'model/version not allowed';
+            logJSON('txt2img.model.not.allowed', { uid, modelKey, exists, enabled });
+            return res.status(400).json({ ok: false, error: exists && !enabled ? 'MODEL_DISABLED' : 'INVALID_INPUT', message: msg });
+        }
 
         // Moderation on prompt
         const v = moderateInput({ prompt: (inputs.prompt || rootPrompt || ''), negative_prompt: '', width: inputs.width, height: inputs.height });

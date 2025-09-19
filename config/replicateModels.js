@@ -17,7 +17,8 @@ const MODELS = {
         version: envOr('RPL_SDXL_TTI_VERSION', ''),
         category: 'image',
         cost: 6,
-        enabled: envOr('RPL_SDXL_TTI_ENABLED', 'true') === 'true',
+        // Default disabled unless explicitly enabled via env
+        enabled: envOr('RPL_SDXL_TTI_ENABLED', 'false') === 'true',
         label: 'SDXL Text-to-Image',
     },
     'seedream-3': {
@@ -25,7 +26,8 @@ const MODELS = {
         version: envOr('RPL_SEEDREAM3_VERSION', ''),
         category: 'image',
         cost: 10,
-        enabled: envOr('RPL_SEEDREAM3_ENABLED', 'true') === 'true',
+        // Default disabled unless explicitly enabled via env
+        enabled: envOr('RPL_SEEDREAM3_ENABLED', 'false') === 'true',
         label: 'Seedream 3',
     },
     'nano-banana': {
@@ -33,7 +35,8 @@ const MODELS = {
         version: envOr('RPL_NANOBANANA_VERSION', ''),
         category: 'image',
         cost: 12,
-        enabled: envOr('RPL_NANOBANANA_ENABLED', 'true') === 'true',
+        // Default disabled unless explicitly enabled via env
+        enabled: envOr('RPL_NANOBANANA_ENABLED', 'false') === 'true',
         label: 'Nano-Banana (Google)',
     },
     'wan-2.2': {
@@ -41,7 +44,8 @@ const MODELS = {
         version: envOr('RPL_WAN22_VERSION', ''),
         category: 'image',
         cost: 8,
-        enabled: envOr('RPL_WAN22_ENABLED', 'true') === 'true',
+        // Default disabled unless explicitly enabled via env
+        enabled: envOr('RPL_WAN22_ENABLED', 'false') === 'true',
         label: 'Wan 2.2',
     },
     'sdxl-img2img': {
