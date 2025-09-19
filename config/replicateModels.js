@@ -11,6 +11,39 @@ function envOr(name, def) {
 }
 
 const MODELS = {
+    // Text-to-Image unified keys (sdxl, seedream-3, nano-banana, wan-2.2)
+    'sdxl': {
+        slug: envOr('RPL_SDXL_TTI_SLUG', 'stability-ai/sdxl'),
+        version: envOr('RPL_SDXL_TTI_VERSION', ''),
+        category: 'image',
+        cost: 6,
+        enabled: envOr('RPL_SDXL_TTI_ENABLED', 'true') === 'true',
+        label: 'SDXL Text-to-Image',
+    },
+    'seedream-3': {
+        slug: envOr('RPL_SEEDREAM3_SLUG', 'arsd/seedream-3'),
+        version: envOr('RPL_SEEDREAM3_VERSION', ''),
+        category: 'image',
+        cost: 10,
+        enabled: envOr('RPL_SEEDREAM3_ENABLED', 'true') === 'true',
+        label: 'Seedream 3',
+    },
+    'nano-banana': {
+        slug: envOr('RPL_NANOBANANA_SLUG', 'google/nano-banana'),
+        version: envOr('RPL_NANOBANANA_VERSION', ''),
+        category: 'image',
+        cost: 12,
+        enabled: envOr('RPL_NANOBANANA_ENABLED', 'true') === 'true',
+        label: 'Nano-Banana (Google)',
+    },
+    'wan-2.2': {
+        slug: envOr('RPL_WAN22_SLUG', 'wan280/wann2-2'),
+        version: envOr('RPL_WAN22_VERSION', ''),
+        category: 'image',
+        cost: 8,
+        enabled: envOr('RPL_WAN22_ENABLED', 'true') === 'true',
+        label: 'Wan 2.2',
+    },
     'sdxl-img2img': {
         slug: 'stability-ai/sdxl',
         version: envOr('RPL_SDXL_IMG2IMG_VERSION', 'f0b8f398e8374918bcf2f3f1b792585c'),

@@ -2,6 +2,8 @@ const express = require('express');
 const requireAuth = require('../middlewares/requireAuth');
 const { MODELS, getModel, ENV } = require('../config/replicateModels');
 const rpl = require('../services/replicateService');
+const { resolveLatestVersion } = require('../services/replicateService');
+const { getDimensions } = require('../utils/sizeMapper');
 const jobs = require('../services/jobService');
 const credits = require('../services/creditsService');
 const { db, admin } = require('../utils/firebaseUtils');
@@ -66,13 +68,16 @@ router.post('/txt2img', requireAuth, async (req, res) => {
         const v = moderateInput({ prompt: (inputs.prompt || rootPrompt || ''), negative_prompt: '', width: inputs.width, height: inputs.height });
         if (!v.ok) { await logModerationEvent({ uid, jobId: null, code: v.code, reason: v.reason, prompt: inputs.prompt || '' }); return res.status(422).json({ ok: false, error: 'MODERATION_BLOCKED', reason: v.reason }); }
 
-        // Pricing and holds: per-image pricing for SeeDream-4 with only 2K/4K allowed
+        // Pricing and holds
         let pricePerImage = Number(model.cost || 1);
         let requestedImages = 1;
         let cost = pricePerImage; // fallback
 
-        // Map inputs for seedream4 (others can be added later)
+        // Build inputs per model
         let replicateInput = {};
+        // Metadata for Firestore docs
+        let metaAspect = '1:1';
+        let metaSize = '1:1';
         if (modelKey === 'seedream4') {
             if (Object.prototype.hasOwnProperty.call(body, 'aspect')) {
                 return res.status(422).json({ ok: false, error: 'INVALID_INPUT', message: 'Use aspect_ratio, not aspect' });
@@ -99,6 +104,36 @@ router.post('/txt2img', requireAuth, async (req, res) => {
             pricePerImage = (finalSize === '4K') ? 48 : 24; // treat anything not 4K as 2K pricing
             requestedImages = replicateInput.max_images;
             cost = pricePerImage * requestedImages;
+            metaAspect = replicateInput.aspect_ratio || 'match_input_image';
+            metaSize = (replicateInput.size === '4K') ? '4K' : '2K';
+        } else if (modelKey === 'sdxl' || modelKey === 'seedream-3' || modelKey === 'nano-banana') {
+            const promptStr = String(inputs.prompt || rootPrompt || '').slice(0, 500);
+            const quality = (body.quality || inputs.quality || 'standard').toString();
+            const sizeStr = (body.size || inputs.size || '1:1').toString();
+            const dims = getDimensions(sizeStr, quality === 'hd' ? 'hd' : 'standard');
+            replicateInput = { prompt: promptStr, width: dims.width, height: dims.height };
+            if (body.negativePrompt || inputs.negativePrompt || inputs.negative_prompt) {
+                replicateInput.negative_prompt = String(body.negativePrompt || inputs.negativePrompt || inputs.negative_prompt || '').slice(0, 400);
+            }
+            if (body.seed || inputs.seed) {
+                const s = Number(body.seed || inputs.seed);
+                if (!Number.isNaN(s)) replicateInput.seed = s;
+            }
+            if (modelKey === 'sdxl') pricePerImage = 6;
+            if (modelKey === 'seedream-3') pricePerImage = 10;
+            if (modelKey === 'nano-banana') pricePerImage = 12;
+            requestedImages = 1; cost = pricePerImage * requestedImages;
+            metaAspect = sizeStr; metaSize = sizeStr;
+        } else if (modelKey === 'wan-2.2') {
+            const promptStr = String(inputs.prompt || rootPrompt || '').slice(0, 500);
+            const aspect_ratio = (body.aspect_ratio || inputs.aspect_ratio || body.size || inputs.size || '1:1').toString();
+            const megapixels = Math.max(1, Math.min(4, parseInt(body.megapixels || inputs.megapixels || '1', 10)));
+            const juiced = Boolean((body.juiced ?? inputs.juiced) ?? false);
+            const output_format = (body.output_format || inputs.output_format || 'jpg').toString();
+            const output_quality = Math.max(1, Math.min(100, parseInt(body.output_quality || inputs.output_quality || '75', 10)));
+            replicateInput = { prompt: promptStr, aspect_ratio, megapixels, juiced, output_format, output_quality };
+            pricePerImage = 8; requestedImages = 1; cost = pricePerImage * requestedImages;
+            metaAspect = aspect_ratio; metaSize = aspect_ratio;
         } else {
             return res.status(400).json({ ok: false, error: 'MODEL_NOT_SUPPORTED' });
         }
@@ -123,9 +158,9 @@ router.post('/txt2img', requireAuth, async (req, res) => {
                 uid,
                 prompt: replicateInput.prompt || '',
                 modelKey,
-                size: (replicateInput.size === '4K') ? '4K' : '2K',
-                aspectRatio: replicateInput.aspect_ratio || 'match_input_image',
-                max_images: replicateInput.max_images || 1,
+                size: metaSize,
+                aspectRatio: metaAspect,
+                max_images: replicateInput.max_images || requestedImages || 1,
                 creditsSpent: cost,
                 status: 'pending',
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -138,8 +173,8 @@ router.post('/txt2img', requireAuth, async (req, res) => {
         // Placeholder docs in users/{uid}/images/{jobId}-{i} (status: pending)
         try {
             const numOutputs = Number(replicateInput.max_images || requestedImages || 1);
-            const ar = replicateInput.aspect_ratio || 'match_input_image';
-            const sz = (replicateInput.size === '4K') ? '4K' : '2K';
+            const ar = metaAspect || '1:1';
+            const sz = metaSize || '1:1';
             const previewDataUrl = 'data:image/svg+xml;utf8,' + encodeURIComponent(`<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="160" height="160"><rect width="100%" height="100%" fill="#1f2237"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#9aa4d6" font-size="14" font-family="Arial, Helvetica, sans-serif">Generating…</text></svg>`);
             const batch = db.batch();
             for (let i = 0; i < numOutputs; i++) {
@@ -177,8 +212,16 @@ router.post('/txt2img', requireAuth, async (req, res) => {
         }
         console.log('[txt2img] job created', { jobId: job._id, webhook });
         if (typeof rpl.setReplicateLogContext === 'function') rpl.setReplicateLogContext(() => ({ uid, jobId: job._id, modelKey, modelVersion: model.version }));
-        // Use pinned version from config; do not resolve dynamically
-        const useVersion = model.version;
+        // Use pinned version from config; if missing, resolve latest for slug
+        let useVersion = model.version;
+        if (!useVersion || String(useVersion).length < 8) {
+            try {
+                useVersion = await resolveLatestVersion(model.slug, model.version || '');
+            } catch (e) {
+                logJSON('txt2img.version.resolve.failed', { model: modelKey, slug: model.slug, msg: e?.message });
+                return res.status(500).json({ ok: false, error: 'MODEL_VERSION_RESOLVE_FAILED' });
+            }
+        }
         const { data, latencyMs, attemptsUsed } = await rpl.createPrediction({ version: useVersion, input: replicateInput, webhook, webhook_events_filter: ['completed'] });
         await jobs.updateJob(job._id, { status: 'running', provider: 'replicate', providerPredictionId: data.id, metrics: { createLatencyMs: latencyMs, replicateCreateAttempts: attemptsUsed }, modelResolvedVersion: useVersion });
         try { await db.collection('imageGenerations').doc(job._id).set({ replicatePredictionId: data.id, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }); } catch { }

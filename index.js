@@ -151,8 +151,6 @@ const plansRoute = require("./routes/plansRoute");
 const creditsRoute = require("./routes/creditsRoute");
 const paymentsRoute = require("./routes/paymentsRoute"); // /api/payments/razorpay
 
-// Keep other existing routes
-const textToImageRoutes = require("./routes/textToImageRoutes");
 let gptRoute = null;
 try {
   gptRoute = require("./routes/gptRoute");
@@ -209,7 +207,6 @@ app.use("/api/debug", debugRoute);
 const debugSmokeTestRoute = require("./routes/debugSmokeTestRoute");
 app.use("/api/debug", debugSmokeTestRoute);
 
-app.use("/api/text2img", textToImageRoutes);
 if (gptRoute) app.use("/api/gpt", gptRoute);
 app.use("/api/user", userRoute);
 app.use("/api/admin", adminRoute);

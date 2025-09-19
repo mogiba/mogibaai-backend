@@ -60,9 +60,17 @@ async function handleReplicateWebhook(req, res) {
                 // Create/Upsert gallery doc under users/{uid}/images/{jobId}-{i}
                 const gid = `${job._id}-${i}`;
                 try {
-                    // Flip placeholder to succeeded and fill URLs
-                    await db.collection('users').doc(job.userId).collection('images').doc(gid).set({
-                        status: 'succeeded',
+                    // Flip placeholder to ready and fill URLs, preserving createdAt
+                    const docRef = db.collection('users').doc(job.userId).collection('images').doc(gid);
+                    await docRef.set({
+                        uid: job.userId,
+                        jobId: job._id,
+                        index: i,
+                        modelKey: job.modelKey || 'seedream4',
+                        prompt: job?.input?.prompt || null,
+                        aspectRatio: job?.input?.aspect_ratio || null,
+                        size: job?.input?.size || null,
+                        status: 'ready',
                         storagePath: r.storagePath,
                         downloadURL: signed?.url || null,
                         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
