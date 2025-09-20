@@ -1,11 +1,27 @@
+const path = require('path');
+try { require('dotenv').config({ path: path.join(__dirname, '..', '.env') }); } catch { }
 const axios = require('axios');
 const { getReplicateAgent } = require('../lib/proxy');
 
+const fs = require('fs');
+try {
+    if (!process.env.REPLICATE_API_TOKEN) {
+        const envPath = path.join(__dirname, '..', '.env');
+        if (fs.existsSync(envPath)) {
+            const raw = fs.readFileSync(envPath, 'utf8');
+            const m = raw.match(/^REPLICATE_API_TOKEN=(.+)$/m);
+            if (m && m[1]) process.env.REPLICATE_API_TOKEN = m[1].trim();
+        }
+    }
+} catch { }
 const API = 'https://api.replicate.com/v1';
 const TOKEN = process.env.REPLICATE_API_TOKEN || '';
 const WEBHOOK_SECRET = process.env.REPLICATE_WEBHOOK_SECRET || '';
 
-if (!TOKEN) console.warn('[replicate] REPLICATE_API_TOKEN missing');
+if (!TOKEN) {
+    const masked = (process.env.REPLICATE_API_TOKEN || '').length;
+    console.warn('[replicate] REPLICATE_API_TOKEN missing', { len: masked });
+}
 
 let contextLogger = () => ({});
 function setReplicateLogContext(fn) { contextLogger = typeof fn === 'function' ? fn : (() => ({})); }
@@ -158,7 +174,7 @@ function buildSeedream4Input(payload = {}) {
     let { prompt, size, width, height, aspect_ratio, max_images, image_input, sequential_image_generation } = payload;
     prompt = (prompt || '').toString();
     size = (size || '').toString();
-    aspect_ratio = (aspect_ratio || 'match_input_image').toString();
+    aspect_ratio = (aspect_ratio || '1:1').toString();
     sequential_image_generation = (sequential_image_generation || 'disabled').toString();
     max_images = Math.max(1, Math.min(15, Number(max_images || 1)));
     image_input = Array.isArray(image_input) ? image_input : [];
@@ -173,7 +189,7 @@ function buildSeedream4Input(payload = {}) {
         size = (sUp === 'CUSTOM') ? 'custom' : sUp;
     }
 
-    if (!allowedAspect.includes(aspect_ratio)) aspect_ratio = 'match_input_image';
+    if (!allowedAspect.includes(aspect_ratio)) aspect_ratio = '1:1';
 
     const input = { prompt, size, aspect_ratio, max_images, sequential_image_generation, image_input };
     if (size === 'custom') {

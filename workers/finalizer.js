@@ -2,6 +2,7 @@ const { db, getSignedUrlForPath, admin, bucket, buildOwnerOutputPath } = require
 const axios = require('axios');
 const { /* storeReplicateOutput */ } = require('../services/outputStore');
 const { getPrediction, setReplicateLogContext } = require('../services/replicateService');
+const jobs = require('../services/jobService');
 // replicateUtils may be an ES module default export or a CJS export.
 let normalizeOutputUrls = null;
 const candidatePaths = [
@@ -71,6 +72,10 @@ async function finalizePrediction({ uid, jobId, predId }) {
         }
 
         console.log('[finalizer] begin image download+upload pipeline', { uid, jobId, count: urls.length });
+        const outputEntries = [];
+        // Load job to compute billing and to update status later
+        let parentJob = null;
+        try { parentJob = await jobs.getJob(jobId); } catch (_) { parentJob = null; }
         for (let i = 0; i < urls.length; i++) {
             const sourceUrl = urls[i];
             const fileName = `${jobId}-${i}.png`;
@@ -84,10 +89,13 @@ async function finalizePrediction({ uid, jobId, predId }) {
                 const buf = Buffer.from(resp.data);
                 if (!bucket) {
                     console.warn('[finalizer] bucket missing, skipping upload, will store raw url only');
+                    // record output entry with direct URL only
+                    outputEntries.push({ storagePath: null, filename: fileName, contentType: resp.headers['content-type'] || 'image/png', bytes: buf.length, downloadURL: sourceUrl, sourceUrl });
                 } else {
                     const file = bucket.file(storagePath);
                     await file.save(buf, { metadata: { contentType: resp.headers['content-type'] || 'image/png' }, resumable: false, public: false, validation: false });
                     try { const su = await getSignedUrlForPath(storagePath); signed = su?.url || null; } catch { signed = null; }
+                    outputEntries.push({ storagePath, filename: fileName, contentType: resp.headers['content-type'] || 'image/png', bytes: buf.length, downloadURL: signed || null, sourceUrl });
                 }
                 await db.collection('users').doc(uid).collection('images').doc(docId).set({
                     uid,
@@ -148,6 +156,7 @@ async function finalizePrediction({ uid, jobId, predId }) {
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         updatedAt: new Date()
                     }, { merge: true });
+                    outputEntries.push({ storagePath: null, filename: fileName, contentType: null, bytes: 0, downloadURL: sourceUrl, sourceUrl, uploadError: msg });
                     try {
                         await db.collection('userGallery').doc(uid).collection('images').doc(docId).set({
                             uid,
@@ -175,6 +184,33 @@ async function finalizePrediction({ uid, jobId, predId }) {
             console.log('[finalizer] updating imageGenerations doc', { jobId, outputs: urls.length });
             await db.collection('imageGenerations').doc(jobId).set({ status: 'succeeded', outputsCount: urls.length, updatedAt: new Date() }, { merge: true });
         } catch (e) { console.warn('[finalizer] failed updating imageGenerations doc', e?.message || String(e)); }
+
+        // Update job status + capture credits hold
+        try {
+            const billedImages = Array.isArray(outputEntries) ? outputEntries.length : 0;
+            const hasPerImage = parentJob && Number.isFinite(Number(parentJob.pricePerImage));
+            if (hasPerImage) {
+                const ppi = Number(parentJob.pricePerImage || 0);
+                const totalDebited = Math.max(0, billedImages * ppi);
+                await jobs.updateJob(jobId, { status: 'succeeded', output: outputEntries, stored: true, billedImages, totalDebited });
+                if (totalDebited > 0) {
+                    await jobs.ensureDebitOnce({ jobId, userId: uid, category: 'image', cost: totalDebited }).catch(() => null);
+                    let remaining = null;
+                    try { const have = await require('../services/creditsService').getUserCredits(uid); remaining = have?.image ?? null; } catch { remaining = null; }
+                    await jobs.finalizeHold(jobId, 'captured', { pricePerImage: ppi, billedImages, totalDebited, remainingBalance: remaining }).catch(() => null);
+                } else {
+                    await jobs.finalizeHold(jobId, 'released_nothing_to_bill').catch(() => null);
+                }
+            } else {
+                await jobs.updateJob(jobId, { status: 'succeeded', output: outputEntries, stored: true });
+                const cost = parentJob?.cost || 1;
+                await jobs.ensureDebitOnce({ jobId, userId: uid, category: 'image', cost }).catch(() => null);
+                let remaining = null; try { const have = await require('../services/creditsService').getUserCredits(uid); remaining = have?.image ?? null; } catch { remaining = null; }
+                await jobs.finalizeHold(jobId, 'captured', { price: cost, remainingBalance: remaining }).catch(() => null);
+            }
+        } catch (e) {
+            console.warn('[finalizer] failed updating job/billing', e?.message || String(e));
+        }
 
         console.log('[finalizer] stored', { uid, jobId, outputs: urls.length });
         console.log('[finalizer] wrote', { uid, jobId, count: urls.length });

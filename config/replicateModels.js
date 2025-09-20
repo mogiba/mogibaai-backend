@@ -1,3 +1,17 @@
+const path = require('path');
+try { require('dotenv').config({ path: path.join(__dirname, '..', '.env') }); } catch { }
+const fs = require('fs');
+// Fallback: if REPLICATE_API_TOKEN still missing, try parse .env manually
+try {
+    if (!process.env.REPLICATE_API_TOKEN) {
+        const envPath = path.join(__dirname, '..', '.env');
+        if (fs.existsSync(envPath)) {
+            const raw = fs.readFileSync(envPath, 'utf8');
+            const m = raw.match(/^REPLICATE_API_TOKEN=(.+)$/m);
+            if (m && m[1]) process.env.REPLICATE_API_TOKEN = m[1].trim();
+        }
+    }
+} catch { }
 /**
  * Allowlisted Replicate models with pinned versions, costs, and enable flags.
  * Keep IDs per env distinct via process.env. Fallbacks included for dev.
@@ -11,42 +25,25 @@ function envOr(name, def) {
 }
 
 const MODELS = {
-    // Text-to-Image unified keys (sdxl, seedream-3, nano-banana, wan-2.2)
+    // Text-to-Image unified keys (sdxl, nano-banana, seedream4)
     'sdxl': {
         slug: envOr('RPL_SDXL_TTI_SLUG', 'stability-ai/sdxl'),
         version: envOr('RPL_SDXL_TTI_VERSION', ''),
         category: 'image',
         cost: 6,
-        // Default disabled unless explicitly enabled via env
-        enabled: envOr('RPL_SDXL_TTI_ENABLED', 'false') === 'true',
+        // Enabled by default; can be disabled via env
+        enabled: envOr('RPL_SDXL_TTI_ENABLED', 'true') === 'true',
         label: 'SDXL Text-to-Image',
-    },
-    'seedream-3': {
-        slug: envOr('RPL_SEEDREAM3_SLUG', 'arsd/seedream-3'),
-        version: envOr('RPL_SEEDREAM3_VERSION', ''),
-        category: 'image',
-        cost: 10,
-        // Default disabled unless explicitly enabled via env
-        enabled: envOr('RPL_SEEDREAM3_ENABLED', 'false') === 'true',
-        label: 'Seedream 3',
     },
     'nano-banana': {
         slug: envOr('RPL_NANOBANANA_SLUG', 'google/nano-banana'),
-        version: envOr('RPL_NANOBANANA_VERSION', ''),
+        // Prefer REPLICATE_NANOBANANA_VERSION if provided, fallback to legacy env var
+        version: process.env.REPLICATE_NANOBANANA_VERSION || envOr('RPL_NANOBANANA_VERSION', ''),
         category: 'image',
         cost: 12,
-        // Default disabled unless explicitly enabled via env
-        enabled: envOr('RPL_NANOBANANA_ENABLED', 'false') === 'true',
+        // Enabled by default; can be disabled via env
+        enabled: envOr('RPL_NANOBANANA_ENABLED', 'true') === 'true',
         label: 'Nano-Banana (Google)',
-    },
-    'wan-2.2': {
-        slug: envOr('RPL_WAN22_SLUG', 'wan280/wann2-2'),
-        version: envOr('RPL_WAN22_VERSION', ''),
-        category: 'image',
-        cost: 8,
-        // Default disabled unless explicitly enabled via env
-        enabled: envOr('RPL_WAN22_ENABLED', 'false') === 'true',
-        label: 'Wan 2.2',
     },
     'sdxl-img2img': {
         slug: 'stability-ai/sdxl',
@@ -120,7 +117,22 @@ const MODELS = {
     },
 };
 
-const FEATURE_REPLICATE_IMG2IMG = (process.env.FEATURE_REPLICATE_IMG2IMG || 'true') === 'true';
+// Feature flag: enabled only if explicitly allowed AND required secrets exist
+const WANT_IMG2IMG = (process.env.FEATURE_REPLICATE_IMG2IMG || 'true') === 'true';
+const HAS_RPL_TOKEN = !!(process.env.REPLICATE_API_TOKEN || '').trim();
+const HAS_RPL_WEBHOOK_SECRET = !!(process.env.REPLICATE_WEBHOOK_SECRET || '').trim();
+// Enable when token exists; webhook secret only needed when using webhooks in prod
+const IS_PROD = (ENV === 'production');
+const FEATURE_REPLICATE_IMG2IMG = WANT_IMG2IMG && (HAS_RPL_TOKEN || !IS_PROD);
+if (WANT_IMG2IMG && !HAS_RPL_TOKEN) {
+    if (IS_PROD) {
+        console.warn('[feature] Img2Img disabled: missing REPLICATE_API_TOKEN');
+    } else {
+        console.warn('[feature] Img2Img enabled for development without REPLICATE_API_TOKEN');
+    }
+} else if (WANT_IMG2IMG && HAS_RPL_TOKEN && !HAS_RPL_WEBHOOK_SECRET) {
+    console.warn('[feature] Img2Img enabled without webhook signature verification; set REPLICATE_WEBHOOK_SECRET for production.');
+}
 
 module.exports = {
     ENV,

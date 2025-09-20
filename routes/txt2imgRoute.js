@@ -39,6 +39,35 @@ router.post('/txt2img', requireAuth, async (req, res) => {
     const uid = req.uid;
     const started = Date.now();
     try {
+        // Debug: log sanitized incoming request from UI
+        try {
+            const ipIn = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
+            const hdr = {
+                origin: req.headers['origin'] || null,
+                referer: req.headers['referer'] || null,
+                ua: req.headers['user-agent'] || null,
+            };
+            const body = req.body || {};
+            const mk = String(body.modelKey || body.model || '').trim();
+            const promptStr = String(body.prompt || body.inputs?.prompt || '').toString();
+            const sz = body.size || body.inputs?.size || null;
+            const ar = body.aspect_ratio || body.inputs?.aspect_ratio || null;
+            const mi = body.max_images || body.inputs?.max_images || null;
+            const ql = body.quality || body.inputs?.quality || null;
+            logJSON('txt2img.request', {
+                uid,
+                ip: ipIn,
+                headers: hdr,
+                modelKey: mk,
+                promptLen: promptStr ? promptStr.length : 0,
+                promptSample: promptStr ? promptStr.slice(0, 120) : '',
+                size: sz,
+                aspect_ratio: ar,
+                max_images: mi,
+                quality: ql,
+            });
+        } catch (_) { /* ignore logging errors */ }
+
         // If client sends uid, it must match signer (defensive)
         const bodyUid = req.body && typeof req.body.uid !== 'undefined' ? String(req.body.uid) : null;
         if (bodyUid && bodyUid !== uid) {
@@ -112,7 +141,7 @@ router.post('/txt2img', requireAuth, async (req, res) => {
             cost = pricePerImage * requestedImages;
             metaAspect = replicateInput.aspect_ratio || 'match_input_image';
             metaSize = (replicateInput.size === '4K') ? '4K' : '2K';
-        } else if (modelKey === 'sdxl' || modelKey === 'seedream-3' || modelKey === 'nano-banana') {
+        } else if (modelKey === 'sdxl' || modelKey === 'nano-banana') {
             const promptStr = String(inputs.prompt || rootPrompt || '').slice(0, 500);
             const quality = (body.quality || inputs.quality || 'standard').toString();
             const sizeStr = (body.size || inputs.size || '1:1').toString();
@@ -126,20 +155,9 @@ router.post('/txt2img', requireAuth, async (req, res) => {
                 if (!Number.isNaN(s)) replicateInput.seed = s;
             }
             if (modelKey === 'sdxl') pricePerImage = 6;
-            if (modelKey === 'seedream-3') pricePerImage = 10;
             if (modelKey === 'nano-banana') pricePerImage = 12;
             requestedImages = 1; cost = pricePerImage * requestedImages;
             metaAspect = sizeStr; metaSize = sizeStr;
-        } else if (modelKey === 'wan-2.2') {
-            const promptStr = String(inputs.prompt || rootPrompt || '').slice(0, 500);
-            const aspect_ratio = (body.aspect_ratio || inputs.aspect_ratio || body.size || inputs.size || '1:1').toString();
-            const megapixels = Math.max(1, Math.min(4, parseInt(body.megapixels || inputs.megapixels || '1', 10)));
-            const juiced = Boolean((body.juiced ?? inputs.juiced) ?? false);
-            const output_format = (body.output_format || inputs.output_format || 'jpg').toString();
-            const output_quality = Math.max(1, Math.min(100, parseInt(body.output_quality || inputs.output_quality || '75', 10)));
-            replicateInput = { prompt: promptStr, aspect_ratio, megapixels, juiced, output_format, output_quality };
-            pricePerImage = 8; requestedImages = 1; cost = pricePerImage * requestedImages;
-            metaAspect = aspect_ratio; metaSize = aspect_ratio;
         } else {
             return res.status(400).json({ ok: false, error: 'MODEL_NOT_SUPPORTED' });
         }
@@ -244,7 +262,7 @@ router.post('/txt2img', requireAuth, async (req, res) => {
     } catch (e) {
         const code = e?.status || e?.response?.status || 500;
         const body = e?.body || e?.response?.data || e?.message;
-        logJSON('txt2img.error', { code, body });
+        logJSON('txt2img.error', { uid, code, body });
         return res.status(code).json({ ok: false, error: code === 422 ? 'UPSTREAM_VALIDATION' : 'SERVICE_TEMPORARILY_UNAVAILABLE', message: body });
     } finally {
         logJSON('txt2img.request.done', { dt: Date.now() - started });
@@ -273,3 +291,11 @@ router.delete('/txt2img/:id', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// Optional: expose model config for quick verification in prod (safe subset)
+router.get('/_debug/models', (req, res) => {
+    const redact = (m) => ({ slug: m.slug, version: m.version, enabled: m.enabled, cost: m.cost, label: m.label });
+    const out = {};
+    for (const [k, v] of Object.entries(MODELS)) out[k] = redact(v);
+    res.json({ ok: true, models: out });
+});

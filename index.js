@@ -1,11 +1,52 @@
 // index.js – stable (webhook-first, storage bucket auto-resolve, routes wired)
-
-require("dotenv").config();
+const path = require("path");
+const fs = require("fs");
+// Load .env from this folder explicitly (cwd may be repo root)
+try {
+  const envPath = path.join(__dirname, ".env");
+  if (fs.existsSync(envPath)) {
+    const raw = fs.readFileSync(envPath, 'utf8');
+    raw.split(/\r?\n/).forEach(line => {
+      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_\-]*)\s*=\s*(.*)\s*$/);
+      if (!m) return;
+      const key = m[1];
+      let val = m[2];
+      // Strip optional quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (!process.env[key]) process.env[key] = val;
+    });
+    try {
+      const len = (process.env.REPLICATE_API_TOKEN || '').length;
+      console.log('[env] REPLICATE_API_TOKEN length =', len);
+    } catch { }
+  }
+} catch { }
+try {
+  const p = path.join(__dirname, ".env");
+  const exists = require('fs').existsSync(p);
+  console.log(`[env] dotenv path=${p} exists=${exists}`);
+  if (exists) {
+    const keys = [
+      'REPLICATE_API_TOKEN',
+      'REPLICATE_WEBHOOK_SECRET',
+      'PUBLIC_API_BASE',
+      'RAZORPAY_KEY_ID'
+    ];
+    const snapshot = keys.reduce((acc, k) => { const v = process.env[k] || ''; acc[k] = v ? `${v.slice(0, 3)}…(${v.length})` : 'missing'; return acc; }, {});
+    console.log('[env] snapshot', snapshot);
+  }
+} catch { }
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
+try {
+  const tl = (process.env.REPLICATE_API_TOKEN || '').length;
+  console.log('[env] before require(config/replicateModels) token length =', tl);
+} catch { }
 const { FEATURE_REPLICATE_IMG2IMG } = require('./config/replicateModels');
+const multer = require('multer');
+const upload = multer().any(); // Accept both image/file fields
 
 // --- Razorpay debug (safe) ---
 const kId = (process.env.RAZORPAY_KEY_ID || "").trim();
@@ -101,32 +142,45 @@ app.use(
   express.raw({ type: "application/json" }),
 );
 
-// Global middleware for the rest
-app.use(express.json({ limit: "20mb" }));
-
 // CORS: allow dev localhost and production frontend, permit Authorization and X-Uid
-const allowedOrigins = ["http://localhost:3000", "https://mogibaai.com", "https://www.mogibaai.com"];
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:3001",
+  "https://mogibaai.com",
+  "https://www.mogibaai.com",
+];
+const allowedOriginsLower = allowedOrigins.map((s) => s.toLowerCase());
+const IS_DEV = (process.env.ENV_NAME || process.env.NODE_ENV || 'development') !== 'production';
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (IS_DEV) return callback(null, true);
+    if (!origin) return callback(null, true);
+    const o = String(origin).toLowerCase();
+    if (allowedOriginsLower.indexOf(o) !== -1) return callback(null, true);
+    try {
+      const u = new URL(o);
+      const host = (u.hostname || '').toLowerCase();
+      const port = (u.port || '').toString();
+      if (host === 'mogibaai.com' || host.endsWith('.mogibaai.com')) return callback(null, true);
+      if (host === 'localhost' || host === '127.0.0.1') return callback(null, true);
+    } catch (_) { }
+    console.warn('[CORS] blocked origin', origin);
+    const msg = "The CORS policy for this site does not allow access from the specified Origin.";
+    return callback(new Error(msg), false);
+  },
+  credentials: true,
+  allowedHeaders: ["Content-Type", "Authorization", "X-Uid", "X-Forwarded-Authorization", "X-Email"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+};
 app.use(
   cors({
-    origin: function (origin, callback) {
-      // allow requests with no origin (e.g. curl, server-to-server)
-      if (!origin) return callback(null, true);
-      // exact match list
-      if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
-      // allow any subdomain of mogibaai.com
-      try {
-        const u = new URL(origin);
-        if (u.hostname && (u.hostname === 'mogibaai.com' || u.hostname.endsWith('.mogibaai.com'))) return callback(null, true);
-      } catch (_) { }
-      const msg = "The CORS policy for this site does not allow access from the specified Origin.";
-      return callback(new Error(msg), false);
-    },
-    credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization", "X-Uid", "X-Forwarded-Authorization", "X-Email"],
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    ...corsOptions,
   }),
 );
 console.log("CORS: allowed origins ->", allowedOrigins.join(", "), ' + *.mogibaai.com');
+if (IS_DEV) console.log('[CORS] Development mode: allowing all origins');
 
 // Important: when credentials:true is used, Access-Control-Allow-Origin must
 // NOT be the wildcard '*' — some environments or proxies may rewrite headers
@@ -138,13 +192,16 @@ app.use((req, res, next) => {
   try {
     const u = new URL(origin);
     const host = u.hostname;
-    if (allowedOrigins.indexOf(origin) !== -1 || host === 'mogibaai.com' || host.endsWith('.mogibaai.com') || host === 'localhost') {
+    if (allowedOrigins.indexOf(origin) !== -1 || host === 'mogibaai.com' || host.endsWith('.mogibaai.com') || host === 'localhost' || host === '127.0.0.1') {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
     }
   } catch (e) { }
   return next();
 });
+
+// Global middleware for the rest
+app.use(express.json({ limit: "20mb" }));
 
 // === Routes ===
 const plansRoute = require("./routes/plansRoute");
@@ -199,6 +256,9 @@ app.use('/api', txt2imgRoute);
 // Images route (delete etc.)
 const imagesRoute = require('./routes/imagesRoute');
 app.use('/api/images', imagesRoute);
+// Community admin actions
+const communityRoute = require('./routes/communityRoute');
+app.use('/api/community', communityRoute);
 
 // Debug echo endpoints (POST /api/debug/echo)
 const debugRoute = require("./routes/debugRoute");
@@ -213,18 +273,8 @@ app.use("/api/admin", adminRoute);
 
 // Start
 const PORT = process.env.PORT || 4000;
-// Fail fast for Replicate secrets when feature is enabled
+// Validate storage bucket if img2img is enabled
 if (FEATURE_REPLICATE_IMG2IMG) {
-  const tok = (process.env.REPLICATE_API_TOKEN || '').trim();
-  const whs = (process.env.REPLICATE_WEBHOOK_SECRET || '').trim();
-  if (!tok || !whs) {
-    console.error('❌ Missing Replicate configuration:', {
-      hasToken: !!tok,
-      hasWebhookSecret: !!whs,
-    });
-    throw new Error('REPLICATE_API_TOKEN and REPLICATE_WEBHOOK_SECRET are required when FEATURE_REPLICATE_IMG2IMG is enabled');
-  }
-  // Ensure Firebase Storage bucket available when running img2img
   const STORAGE_BACKEND = process.env.STORAGE_BACKEND || 'firebase';
   if (STORAGE_BACKEND === 'firebase') {
     if (!__storageBucket) {
@@ -233,6 +283,22 @@ if (FEATURE_REPLICATE_IMG2IMG) {
     }
   }
 }
+
+// Global error handler: ensure JSON responses for all errors
+app.use((err, req, res, next) => {
+  try {
+    const code = Number(err?.status || err?.statusCode || 500);
+    const msg = err?.message || 'Internal Server Error';
+    // Normalize CORS/body-parser errors
+    const isCors = /CORS policy/i.test(msg);
+    const out = isCors
+      ? { ok: false, error: 'CORS', message: msg }
+      : { ok: false, error: 'INTERNAL', message: msg };
+    res.status(code >= 400 && code < 600 ? code : 500).json(out);
+  } catch (_) {
+    res.status(500).json({ ok: false, error: 'INTERNAL', message: 'unknown' });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`✅ Server started on http://localhost:${PORT}`);

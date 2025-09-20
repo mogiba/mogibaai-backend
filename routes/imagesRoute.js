@@ -148,20 +148,49 @@ router.post('/backfill', requireAuth, async (req, res) => {
     }
 });
 
-// DELETE /api/images/:id -> deletes Firestore doc (images/{id}) and its Storage file
+// DELETE /api/images/:id -> deletes user's gallery doc users/{uid}/images/{id} and its Storage file; fallback to global images/{id}
 router.delete('/:id', requireAuth, async (req, res) => {
     const id = req.params.id;
     if (!id) return res.status(400).json({ ok: false, error: 'INVALID_INPUT' });
     try {
+        // Prefer unified per-user gallery path
+        const userDocRef = db.collection('users').doc(req.uid).collection('images').doc(id);
+        const userSnap = await userDocRef.get();
+        if (userSnap.exists) {
+            const d = userSnap.data() || {};
+            const storagePath = d.storagePath || null;
+            const jobId = String(id).split('-')[0];
+            if (storagePath) { try { await deleteObject(storagePath); } catch (_) { /* ignore */ } }
+            await userDocRef.delete();
+            // Best-effort: remove matching global images doc by storagePath
+            try {
+                if (storagePath) {
+                    const gq = await db.collection('images').where('uid', '==', req.uid).where('storagePath', '==', storagePath).limit(5).get();
+                    const batch = db.batch();
+                    gq.forEach((doc) => batch.delete(doc.ref));
+                    if (!gq.empty) await batch.commit();
+                }
+                // Also try to remove generation doc so gallery base list shrinks
+                if (jobId) {
+                    const genRef = db.collection('imageGenerations').doc(jobId);
+                    const genSnap = await genRef.get();
+                    if (genSnap.exists) {
+                        const gd = genSnap.data() || {};
+                        if (gd.uid === req.uid) await genRef.delete();
+                    }
+                }
+            } catch (_) { }
+            return res.json({ ok: true });
+        }
+
+        // Fallback legacy: global images collection
         const ref = db.collection('images').doc(id);
         const snap = await ref.get();
         if (!snap.exists) return res.status(404).json({ ok: false, error: 'not_found' });
         const data = snap.data();
         if (!data || data.uid !== req.uid) return res.status(403).json({ ok: false, error: 'forbidden' });
         const storagePath = data.storagePath;
-        if (storagePath) {
-            try { await deleteObject(storagePath); } catch (_) { /* ignore */ }
-        }
+        if (storagePath) { try { await deleteObject(storagePath); } catch (_) { /* ignore */ } }
         await ref.delete();
         return res.json({ ok: true });
     } catch (e) {
