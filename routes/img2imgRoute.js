@@ -85,6 +85,14 @@ router.post('/admin/replicate/models', requireAuth, async (req, res) => {
 });
 
 router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
+    try {
+        const ct0 = (req.headers['content-type'] || '').toLowerCase();
+        const files0 = Array.isArray(req.files) ? req.files.map(f => ({ field: f.fieldname, type: f.mimetype, bytes: (typeof f.size === 'number' ? f.size : (f.buffer ? f.buffer.length : null)), name: f.originalname })) : [];
+        const bodyKeys0 = Object.keys(req.body || {});
+        const inputStr0 = req.body && typeof req.body.input === 'string' ? req.body.input : '';
+        const promptFlat0 = req.body && req.body.prompt ? String(req.body.prompt).slice(0, 140) : null;
+        logJSON('img2img.rx', { uid: req.uid || null, featureFlag: FEATURE_REPLICATE_IMG2IMG, ct: ct0, bodyKeys: bodyKeys0, inputLen: inputStr0 ? inputStr0.length : 0, promptFlat: promptFlat0, files: files0 });
+    } catch (_) { }
     if (!FEATURE_REPLICATE_IMG2IMG) return res.status(503).json({ ok: false, error: 'feature_disabled' });
     const started = Date.now();
     try {
@@ -106,6 +114,7 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
             return res.status(429).json({ ok: false, error: 'RATE_LIMITED', retryAfter: rl.retryAfter });
         }
         const contentType = (req.headers['content-type'] || '').toLowerCase();
+        logJSON('img2img.request.start', { uid: req.uid, ct: contentType, fields: Object.keys(req.body || {}), filesCount: Array.isArray(req.files) ? req.files.length : (req.file ? 1 : 0) });
         const isMultipart = contentType.startsWith('multipart/form-data');
         const isJSON = contentType.startsWith('application/json');
         if (!isMultipart && !isJSON) {
@@ -113,21 +122,41 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         }
         let body = {};
         if (isMultipart) {
-            // Accept fields: model or modelKey, version, prompt, strength, width, height
+            // Accept fields: model or modelKey, version, prompt, strength, width, height, and optional JSON 'input'
             body.model = req.body.model || req.body.modelKey;
             body.version = req.body.version;
-            const promptStr = String(req.body.prompt || '').trim();
-            const strength = req.body.strength != null ? Number(req.body.strength) : undefined;
-            const width = req.body.width != null ? Number(req.body.width) : undefined;
-            const height = req.body.height != null ? Number(req.body.height) : undefined;
-            body.input = { prompt: promptStr, strength, width, height };
+            // Optional flat fields
+            const promptStrFlat = String(req.body.prompt || '').trim();
+            const strengthFlat = req.body.strength != null ? Number(req.body.strength) : undefined;
+            const widthFlat = req.body.width != null ? Number(req.body.width) : undefined;
+            const heightFlat = req.body.height != null ? Number(req.body.height) : undefined;
+            // Optional nested JSON 'input'
+            let inputJson = {};
+            try { if (req.body.input) inputJson = JSON.parse(req.body.input); } catch { inputJson = {}; }
+            body.input = {
+                ...inputJson,
+                prompt: (promptStrFlat || inputJson.prompt || '').toString(),
+                strength: (typeof strengthFlat === 'number' ? strengthFlat : inputJson.strength),
+                width: (typeof widthFlat === 'number' ? widthFlat : inputJson.width),
+                height: (typeof heightFlat === 'number' ? heightFlat : inputJson.height),
+            };
             try { body.postprocess = req.body.postprocess ? JSON.parse(req.body.postprocess) : {}; } catch { body.postprocess = {}; }
         } else {
             body = req.body || {};
         }
 
+        try {
+            const mk0 = String(body.model || body.modelKey || '').trim();
+            const v0 = String(body.version || '').trim();
+            const inp0 = body.input || {};
+            const summ = { modelKey: mk0, version: v0, input: { prompt: (inp0.prompt ? String(inp0.prompt).slice(0, 140) : ''), strength: inp0.strength, width: inp0.width, height: inp0.height } };
+            const filesSumm = Array.isArray(req.files) ? req.files.map(f => ({ field: f.fieldname, type: f.mimetype, bytes: (typeof f.size === 'number' ? f.size : (f.buffer ? f.buffer.length : null)) })) : [];
+            logJSON('img2img.parsed', { ...summ, files: filesSumm });
+        } catch (_) { }
+
         let modelKey = String(body.model || body.modelKey || '').trim();
         if (!ALLOWED_IMG2IMG_MODELS.has(modelKey)) {
+            logJSON('img2img.invalid', { reason: 'model_not_allowed', modelKey });
             return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'model not allowed' });
         }
         if (modelKey === 'nanobanana') modelKey = 'nano-banana';
@@ -139,10 +168,16 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         // Default to allowlisted version if omitted
         if (!version && MODELS[modelKey]) version = MODELS[modelKey].version;
         const model = getModel(modelKey, version);
-        if (!model) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'model/version not allowed' });
+        if (!model) {
+            logJSON('img2img.invalid', { reason: 'model_version_not_allowed', modelKey, version });
+            return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'model/version not allowed' });
+        }
         // Validate prompt mandatory
         const promptStr = String(input.prompt || '').trim();
-        if (!promptStr) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'prompt required' });
+        if (!promptStr) {
+            logJSON('img2img.invalid', { reason: 'prompt_required' });
+            return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'prompt required' });
+        }
 
         // Resolve input image
         let storagePath = String(body.storagePath || input.storagePath || '').trim();
@@ -157,7 +192,10 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         if (!storagePath && fileBuf) {
             try { const up = await uploadInputBufferToFirebase({ uid, buffer: fileBuf, contentType: fileType }); storagePath = up.storagePath; } catch { return res.status(503).json({ ok: false, error: 'SERVICE_TEMPORARILY_UNAVAILABLE', message: 'Failed to prepare input image' }); }
         }
-        if (!storagePath) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'image file or storagePath required' });
+        if (!storagePath) {
+            logJSON('img2img.invalid', { reason: 'no_image', hasFile: !!uf, files: (req.files || []).map(f => f.fieldname) });
+            return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'image file or storagePath required' });
+        }
 
         // Signed URL for Replicate
         let signedUrlObj;
@@ -172,10 +210,10 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         const inputSizeKB = Math.round((head.contentLength || 0) / 1024);
 
         // Moderation
-        const verdict = moderateInput({ prompt: input.prompt || '', negative_prompt: input.negative_prompt || '', width: input.width, height: input.height, imageMeta: {}, imageUrl });
+        const verdict = moderateInput({ prompt: input.prompt || '', negative_prompt: input.negative_prompt || '', width: input.width, height: input.height, imageMeta: {}, imageUrl: null });
         if (!verdict.ok) {
             logJSON('moderation.block', { uid, model: modelKey, code: verdict.code, reason: verdict.reason });
-            await logModerationEvent({ uid, jobId: null, code: verdict.code, reason: verdict.reason, prompt: input.prompt || '', imageUrl });
+            await logModerationEvent({ uid, jobId: null, code: verdict.code, reason: verdict.reason, prompt: input.prompt || '', imageUrl: null });
             return res.status(422).json({ ok: false, error: 'MODERATION_BLOCKED', reason: verdict.reason });
         }
         // If a file was uploaded, optionally run image moderation hook (currently disabled)
