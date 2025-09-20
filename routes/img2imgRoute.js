@@ -149,7 +149,7 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
             const mk0 = String(body.model || body.modelKey || '').trim();
             const v0 = String(body.version || '').trim();
             const inp0 = body.input || {};
-            const summ = { modelKey: mk0, version: v0, input: { prompt: (inp0.prompt ? String(inp0.prompt).slice(0, 140) : ''), strength: inp0.strength, width: inp0.width, height: inp0.height } };
+            const summ = { modelKey: mk0, version: v0, input: { prompt: (inp0.prompt ? String(inp0.prompt).slice(0, 140) : ''), strength: inp0.strength, width: inp0.width, height: inp0.height, output_format: inp0.output_format } };
             const filesSumm = Array.isArray(req.files) ? req.files.map(f => ({ field: f.fieldname, type: f.mimetype, bytes: (typeof f.size === 'number' ? f.size : (f.buffer ? f.buffer.length : null)) })) : [];
             logJSON('img2img.parsed', { ...summ, files: filesSumm });
         } catch (_) { }
@@ -179,18 +179,29 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
             return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'prompt required' });
         }
 
-        // Resolve input image
+        // Resolve input images (supports 1 or 2 uploads)
         let storagePath = String(body.storagePath || input.storagePath || '').trim();
         let fileBuf = null; let fileType = null;
+        let storagePath2 = String(body.storagePath2 || input.storagePath2 || '').trim();
+        let fileBuf2 = null; let fileType2 = null;
         // Accept either multipart file (field name `image` primary, fallback to `file`) or JSON storagePath
         let uf = null;
         if (req.file) uf = req.file;
         if (!uf && Array.isArray(req.files)) {
             uf = req.files.find(f => f.fieldname === 'image') || req.files.find(f => f.fieldname === 'file') || null;
         }
+        // Optional second file: image2 or file2
+        let uf2 = null;
+        if (Array.isArray(req.files)) {
+            uf2 = req.files.find(f => f.fieldname === 'image2') || req.files.find(f => f.fieldname === 'file2') || null;
+        }
         if (uf && Buffer.isBuffer(uf.buffer)) { fileBuf = uf.buffer; fileType = uf.mimetype || 'image/jpeg'; }
+        if (uf2 && Buffer.isBuffer(uf2.buffer)) { fileBuf2 = uf2.buffer; fileType2 = uf2.mimetype || 'image/jpeg'; }
         if (!storagePath && fileBuf) {
             try { const up = await uploadInputBufferToFirebase({ uid, buffer: fileBuf, contentType: fileType }); storagePath = up.storagePath; } catch { return res.status(503).json({ ok: false, error: 'SERVICE_TEMPORARILY_UNAVAILABLE', message: 'Failed to prepare input image' }); }
+        }
+        if (!storagePath2 && fileBuf2) {
+            try { const up2 = await uploadInputBufferToFirebase({ uid, buffer: fileBuf2, contentType: fileType2 }); storagePath2 = up2.storagePath; } catch { /* second image optional */ }
         }
         if (!storagePath) {
             logJSON('img2img.invalid', { reason: 'no_image', hasFile: !!uf, files: (req.files || []).map(f => f.fieldname) });
@@ -199,7 +210,9 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
 
         // Signed URL for Replicate
         let signedUrlObj;
+        let signedUrlObj2 = null;
         try { signedUrlObj = await getSignedUrlForPath(storagePath, { ttlMs: 60 * 60 * 1000 }); } catch (e) { return res.status(500).json({ ok: false, error: 'SIGNED_URL_FAILED', message: e?.message }); }
+        if (storagePath2) { try { signedUrlObj2 = await getSignedUrlForPath(storagePath2, { ttlMs: 60 * 60 * 1000 }); } catch { signedUrlObj2 = null; } }
 
         // HEAD validation via safe fetch
         const head = await safeFetchHead(signedUrlObj.url);
@@ -208,6 +221,12 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
             return res.status(413).json({ ok: false, error: 'PAYLOAD_TOO_LARGE', message: 'Image larger than 10MB' });
         }
         const inputSizeKB = Math.round((head.contentLength || 0) / 1024);
+        let head2 = null; let inputSizeKB2 = 0;
+        if (signedUrlObj2 && signedUrlObj2.url) {
+            head2 = await safeFetchHead(signedUrlObj2.url).catch(() => null);
+            if (head2 && head2.contentType && !head2.contentType.startsWith('image/')) signedUrlObj2 = null;
+            if (head2 && head2.contentLength) inputSizeKB2 = Math.round(head2.contentLength / 1024);
+        }
 
         // Moderation
         const verdict = moderateInput({ prompt: input.prompt || '', negative_prompt: input.negative_prompt || '', width: input.width, height: input.height, imageMeta: {}, imageUrl: null });
@@ -242,7 +261,7 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
             return res.status(500).json({ ok: false, error: 'SERVICE_TEMPORARILY_UNAVAILABLE' });
         }
 
-        // Build replicate input (strict keys): prompt, image, strength (0..1), optional width/height
+        // Build replicate input for nano-banana (supports multiple images via image_input[])
         let strength = Number.isFinite(Number(input.strength)) ? Number(input.strength) : 0.65;
         if (!Number.isFinite(strength)) strength = 0.65;
         strength = Math.min(1, Math.max(0, strength));
@@ -252,9 +271,18 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         else width = undefined;
         if (Number.isFinite(height)) height = Math.max(64, Math.min(4096, Math.floor(height)));
         else height = undefined;
-        const replicateInput = { prompt: promptStr, image: signedUrlObj.url, strength };
+        const replicateInput = { prompt: promptStr };
+        // nano-banana uses image_input (array) + output_format
+        const imgArr = [signedUrlObj.url];
+        if (signedUrlObj2 && signedUrlObj2.url) imgArr.push(signedUrlObj2.url);
+        replicateInput.image_input = imgArr;
+        const ofmt = (typeof input.output_format === 'string' ? input.output_format.toLowerCase() : 'jpg');
+        const ofWhitelist = new Set(['jpg', 'jpeg', 'png', 'webp']);
+        replicateInput.output_format = ofWhitelist.has(ofmt) ? (ofmt === 'jpeg' ? 'jpg' : ofmt) : 'jpg';
+        // Some models accept width/height/strength; nano-banana ignores these, but include only if present
         if (width) replicateInput.width = width;
         if (height) replicateInput.height = height;
+        if (typeof input.strength !== 'undefined') replicateInput.strength = strength;
 
         // Create job with pricing metadata
         const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages });
@@ -326,7 +354,7 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
                 setImmediate(() => finalizePrediction({ uid, jobId: job._id, predId: data.id }).catch(console.error));
             }
         } catch (_) { /* ignore */ }
-        logJSON('img2img.queued', { uid, jobId: job._id, model: modelKey, version: model.version, latencyMs, inputSizeKB, requestId });
+        logJSON('img2img.queued', { uid, jobId: job._id, model: modelKey, version: model.version, latencyMs, inputSizeKB, inputSizeKB2, output_format: replicateInput.output_format, requestId });
         return res.json({ ok: true, jobId: job._id, predId: data.id, env: ENV });
     } catch (e) {
         const code = e?.status || (e?.response?.status) || 500;

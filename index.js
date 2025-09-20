@@ -136,11 +136,14 @@ const { bucket: __storageBucket } = require('./utils/firebaseUtils');
 
 const app = express();
 
-/* === CRITICAL: Razorpay webhook must get RAW body BEFORE json parser === */
-app.use(
-  "/api/payments/razorpay/webhook",
-  express.raw({ type: "application/json" }),
-);
+/* === CRITICAL: Webhooks need RAW body BEFORE json parser === */
+app.use("/api/payments/razorpay/webhook", express.raw({ type: "application/json" }));
+// Replicate webhooks (both canonical and alias) must also receive raw body
+try {
+  const { handleReplicateWebhook } = require('./routes/replicateWebhookRoute');
+  app.post('/api/replicate/webhook', express.raw({ type: 'application/json' }), handleReplicateWebhook);
+  app.post('/api/webhooks/replicate', express.raw({ type: 'application/json' }), handleReplicateWebhook);
+} catch (_) { }
 
 // CORS: allow dev localhost and production frontend, permit Authorization and X-Uid
 const allowedOrigins = [
@@ -236,14 +239,9 @@ app.get('/api/features', (req, res) => {
 app.use("/api/plans", plansRoute);
 app.use("/api/credits", creditsRoute);
 app.use("/api/payments/razorpay", paymentsRoute);
-// Replicate webhook must be raw; mount before global json parser is fine since we already used raw for RZP.
+// Replicate routes (non-webhook endpoints) can mount after JSON
 const replicateWebhookRoute = require('./routes/replicateWebhookRoute');
 app.use('/api/replicate', replicateWebhookRoute);
-// Alias per spec: /api/webhooks/replicate
-try {
-  const { handleReplicateWebhook } = require('./routes/replicateWebhookRoute');
-  app.post('/api/webhooks/replicate', express.raw({ type: 'application/json' }), handleReplicateWebhook);
-} catch { }
 // New billing endpoints (minimal wrapper over payments/razorpay flows)
 const billingRoute = require("./routes/billingRoute");
 app.use("/api/billing", billingRoute);
