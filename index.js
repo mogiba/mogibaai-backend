@@ -219,6 +219,7 @@ try {
 }
 const userRoute = require("./routes/userRoute");
 const adminRoute = require("./routes/adminRoute");
+const adminUsersRoute = require("./routes/adminUsersRoute");
 
 // Health
 app.get("/health", (req, res) =>
@@ -268,6 +269,7 @@ app.use("/api/debug", debugSmokeTestRoute);
 if (gptRoute) app.use("/api/gpt", gptRoute);
 app.use("/api/user", userRoute);
 app.use("/api/admin", adminRoute);
+app.use("/api/admin/users", adminUsersRoute);
 
 // Start
 const PORT = process.env.PORT || 4000;
