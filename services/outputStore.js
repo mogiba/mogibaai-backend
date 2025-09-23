@@ -2,6 +2,8 @@
 const crypto = require('crypto');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');                   // ⬅ add uuid for download tokens
+const path = require('path');
+const fs = require('fs');
 const {
     bucket,
     db,
@@ -122,7 +124,18 @@ async function storeReplicateOutput({
 
 /* ---------- upload an input buffer (for img2img etc.) ---------- */
 async function uploadInputBufferToFirebase({ uid, buffer, contentType }) {
-    if (!bucket) throw new Error('storage_bucket_unavailable');
+    if (!bucket) {
+        // Fallback: save to local tmp_uploads and return a public URL
+        const dir = path.join(__dirname, '..', 'tmp_uploads');
+        try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch { }
+        const ext = (contentType && contentType.includes('png')) ? '.png' : (contentType && contentType.includes('webp')) ? '.webp' : '.jpg';
+        const name = `${(crypto.randomUUID && crypto.randomUUID()) || uuidv4()}${ext}`;
+        const filePath = path.join(dir, name);
+        fs.writeFileSync(filePath, buffer);
+        // Public URL served by express static at /tmp-uploads
+        const urlPath = `/tmp-uploads/${name}`;
+        return { ok: true, url: urlPath, storagePath: urlPath };
+    }
     const ct = contentType || 'application/octet-stream';
     const ext = ct.includes('png')
         ? '.png'
@@ -133,26 +146,35 @@ async function uploadInputBufferToFirebase({ uid, buffer, contentType }) {
                 : '';
     const name =
         (crypto.randomUUID && crypto.randomUUID()) ||
-        crypto.randomBytes(16).toString('hex') + ext;
-
-    const filePath = buildOwnerInputPath(uid, name);
+        crypto.randomBytes(16).toString('hex');
+    const filename = `${name}${ext}`;
+    const filePath = buildOwnerInputPath(uid, filename);
     const file = bucket.file(filePath);
 
-    // Also include a token here (useful for client-side previews of inputs)
-    await file.save(buffer, {
-        metadata: {
-            contentType: ct,
-            cacheControl: 'public, max-age=3600',
+    try {
+        // Also include a token here (useful for client-side previews of inputs)
+        await file.save(buffer, {
             metadata: {
-                firebaseStorageDownloadTokens: uuidv4(),          // ← optional but helpful
+                contentType: ct,
+                cacheControl: 'public, max-age=3600',
+                metadata: {
+                    firebaseStorageDownloadTokens: uuidv4(),
+                },
             },
-        },
-        resumable: false,
-        public: false,
-        validation: false,
-    });
-
-    return { ok: true, url: filePath, storagePath: filePath };
+            resumable: false,
+            public: false,
+            validation: false,
+        });
+        return { ok: true, url: filePath, storagePath: filePath };
+    } catch (e) {
+        // Fallback to tmp-uploads if bucket write fails
+        const dir = path.join(__dirname, '..', 'tmp_uploads');
+        try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch { }
+        const localPath = path.join(dir, filename);
+        fs.writeFileSync(localPath, buffer);
+        const urlPath = `/tmp-uploads/${filename}`;
+        return { ok: true, url: urlPath, storagePath: urlPath };
+    }
 }
 
 module.exports = {

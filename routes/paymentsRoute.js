@@ -5,9 +5,10 @@
 const express = require("express");
 const rzpSvc = require("../services/razorpayService");
 const creditsService = require("../services/creditsService");
-const { db } = require('../utils/firebaseUtils');
+const { db, admin } = require('../utils/firebaseUtils');
 const requireAuth = require('../middlewares/requireAuth');
 const { getAuthoritativePlanById, getTopupPlanById, getSubscriptionPlanById } = require('../utils/plans');
+const { applyCouponIfAny, fetchCoupon, markCouponRedeemed } = require('../services/pricingResolver');
 
 // optional plans map
 let PLANS = null;
@@ -79,6 +80,32 @@ const normalizeCategory = (c, def = "image") => {
 };
 const isRzpPlanId = (s) => typeof s === "string" && /^plan_/i.test(s);
 
+// Atomically redeem a coupon for this order if not already redeemed
+async function redeemCouponOnce({ orderId, couponCode }) {
+  const code = (couponCode || '').toString().toUpperCase();
+  if (!orderId || !code) return { ok: false };
+  const orderRef = db.collection('orders').doc(String(orderId));
+  const couponRef = db.collection('coupons').doc(code);
+  const { FieldValue } = admin.firestore;
+  try {
+    await db.runTransaction(async (tx) => {
+      const [oSnap, cSnap] = await Promise.all([tx.get(orderRef), tx.get(couponRef)]);
+      if (!cSnap.exists) throw new Error('COUPON_NOT_FOUND');
+      const o = oSnap.exists ? (oSnap.data() || {}) : {};
+      if (o.couponRedeemed === true) return; // idempotent
+      const c = cSnap.data() || {};
+      const max = c.maxRedemptions != null ? parseIntSafe(c.maxRedemptions, 0) : null;
+      const cur = parseIntSafe(c.redeemed, 0);
+      if (max != null && cur >= max) throw new Error('COUPON_MAX_REDEEMED');
+      tx.set(couponRef, { redeemed: cur + 1 }, { merge: true });
+      tx.set(orderRef, { couponRedeemed: true }, { merge: true });
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
 /* ---------- topup plans ---------- */
 const ALIASES = {
   img_baby_300: ["img_baby_300", "img-300", "image-300", "img300", "300img", "img_baby"],
@@ -149,13 +176,41 @@ router.post("/create-order", express.json(), requireAuth, async (req, res) => {
 
   // Only trust server-side plan mapping
   const incomingPlanId = String(req.body?.planId || '').trim();
+  const couponCodeRaw = String(req.body?.couponCode || req.body?.coupon || '').trim();
+  const couponCode = couponCodeRaw ? couponCodeRaw.toUpperCase() : '';
+  const planValidityDays = Number(req.body?.planValidityDays || 30);
   const plan = getAuthoritativePlanById(incomingPlanId) || getTopupPlanById(incomingPlanId);
   if (!plan || plan.type !== 'topup') {
     return res.status(400).json({ message: 'Invalid planId' });
   }
 
   try {
-    const order = await rzpSvc.createOrder({ amount: plan.amountINR, currency: 'INR', notes: { uid, planId: plan.planId, type: 'topup', category: plan.category, credits: String(plan.credits) } });
+    // Optional coupon for plans: apply only if coupon is valid for scope 'plans'
+    let finalAmountINR = Number(plan.amountINR);
+    let couponApplied = null;
+    if (couponCode) {
+      const coupon = await fetchCoupon(couponCode);
+      const applied = applyCouponIfAny(finalAmountINR, couponCode, { couponNorm: coupon, scope: 'plans', planId: plan.planId });
+      if (applied.applied) {
+        finalAmountINR = applied.finalAmount;
+        couponApplied = { code: coupon.code, type: coupon.type, value: coupon.value, discountINR: applied.discountAmount };
+      }
+    }
+
+    const order = await rzpSvc.createOrder({
+      amount: finalAmountINR,
+      currency: 'INR',
+      notes: {
+        uid,
+        planId: plan.planId,
+        type: 'topup',
+        category: plan.category,
+        credits: String(plan.credits),
+        coupon: couponApplied?.code || undefined,
+        couponDiscountINR: couponApplied?.discountINR || 0,
+        planValidityDays: Number.isFinite(planValidityDays) && planValidityDays > 0 ? String(planValidityDays) : undefined,
+      }
+    });
 
     // Persist order metadata (idempotent)
     await db.collection('orders').doc(order.id).set({
@@ -164,12 +219,15 @@ router.post("/create-order", express.json(), requireAuth, async (req, res) => {
       category: plan.category,
       credits: plan.credits,
       amountPaise: order.amount,
-      amountINR: plan.amountINR,
+      amountINR: finalAmountINR,
+      amountINROriginal: Number(plan.amountINR),
       currency: order.currency || 'INR',
       receipt: order.receipt || null,
       status: 'created',
       createdAt: new Date(),
       provider: 'razorpay',
+      coupon: couponApplied || null,
+      planValidityDays: Number.isFinite(planValidityDays) && planValidityDays > 0 ? planValidityDays : null,
     }, { merge: true });
 
     res.json({ order, keyId: rzpSvc.getPublicKey() });
@@ -346,12 +404,57 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
         const ref = db.collection('orders').doc(orderId);
         const snap = await ref.get();
         const ord = snap.exists ? snap.data() : {};
+        const couponCode = (notes.coupon || ord?.coupon?.code || '').toString().toUpperCase();
+        const planId = notes.planId || ord.planId || null;
+        const planValidityDays = parseIntSafe(notes.planValidityDays || ord.planValidityDays || '0', 0);
+
+        const expAt = planValidityDays > 0 ? new Date(Date.now() + planValidityDays * 24 * 60 * 60 * 1000) : null;
+        const ensureUserPlanFields = async () => {
+          if (!planId) return;
+          try {
+            const uref = db.collection('users').doc(uid);
+            const patch = { planId };
+            if (expAt) patch.planExpiryAt = expAt;
+            await uref.set(patch, { merge: true });
+          } catch (_) { }
+        };
+
+        const recordBillingEventOnce = async () => {
+          try {
+            const evRef = db.collection('billingEvents').doc(String(orderId));
+            const evSnap = await evRef.get();
+            if (evSnap.exists && evSnap.data()?.paidLogged) return;
+            await evRef.set({
+              orderId,
+              paymentId: pay?.id || null,
+              event: evt.event,
+              uid,
+              planId,
+              category,
+              credits,
+              amountPaise: pay?.amount || null,
+              amountINR: ord?.amountINR || null,
+              coupon: couponCode || null,
+              planExpiryAt: expAt || null,
+              createdAt: new Date(),
+              paidLogged: true,
+            }, { merge: true });
+          } catch (_) { }
+        };
+
+        // Idempotent crediting
         if (ord.credited === true) {
-          // already credited via verify/webhook earlier
+          // already credited earlier; still ensure plan fields, coupon redemption, and audit
+          await ensureUserPlanFields();
+          if (couponCode) {
+            const redeemedFlag = ord?.couponRedeemed === true;
+            if (!redeemedFlag) await redeemCouponOnce({ orderId, couponCode });
+          }
+          await recordBillingEventOnce();
         } else {
           await ref.set({
             uid,
-            planId: notes.planId || ord.planId || null,
+            planId: planId || null,
             category,
             credits,
             amountPaise: pay?.amount || ord.amountPaise || null,
@@ -362,6 +465,9 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
             credited: true,
           }, { merge: true });
           await creditsService.addCredits(uid, category, credits, { source: 'razorpay:webhook', orderId, paymentId: pay?.id });
+          await ensureUserPlanFields();
+          if (couponCode) await redeemCouponOnce({ orderId, couponCode });
+          await recordBillingEventOnce();
         }
       }
     }

@@ -10,6 +10,7 @@ const rpl = require('../services/replicateService');
 const { resolveLatestVersion } = require('../services/replicateService');
 const jobs = require('../services/jobService');
 const credits = require('../services/creditsService');
+const { resolvePrice } = require('../services/pricingResolver');
 const { db, admin, getSignedUrlForPath } = require('../utils/firebaseUtils');
 const { moderateImageBuffer } = require('../lib/moderation');
 const { uploadInputBufferToFirebase } = require('../services/outputStore');
@@ -184,6 +185,7 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         let fileBuf = null; let fileType = null;
         let storagePath2 = String(body.storagePath2 || input.storagePath2 || '').trim();
         let fileBuf2 = null; let fileType2 = null;
+        const uploadedInputPaths = [];
         // Accept either multipart file (field name `image` primary, fallback to `file`) or JSON storagePath
         let uf = null;
         if (req.file) uf = req.file;
@@ -198,10 +200,15 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         if (uf && Buffer.isBuffer(uf.buffer)) { fileBuf = uf.buffer; fileType = uf.mimetype || 'image/jpeg'; }
         if (uf2 && Buffer.isBuffer(uf2.buffer)) { fileBuf2 = uf2.buffer; fileType2 = uf2.mimetype || 'image/jpeg'; }
         if (!storagePath && fileBuf) {
-            try { const up = await uploadInputBufferToFirebase({ uid, buffer: fileBuf, contentType: fileType }); storagePath = up.storagePath; } catch { return res.status(503).json({ ok: false, error: 'SERVICE_TEMPORARILY_UNAVAILABLE', message: 'Failed to prepare input image' }); }
+            try {
+                const up = await uploadInputBufferToFirebase({ uid, buffer: fileBuf, contentType: fileType });
+                storagePath = up.storagePath; uploadedInputPaths.push(storagePath);
+            } catch (e) {
+                return res.status(500).json({ ok: false, error: 'PREPARE_INPUT_FAILED', message: 'Failed to prepare input image' });
+            }
         }
         if (!storagePath2 && fileBuf2) {
-            try { const up2 = await uploadInputBufferToFirebase({ uid, buffer: fileBuf2, contentType: fileType2 }); storagePath2 = up2.storagePath; } catch { /* second image optional */ }
+            try { const up2 = await uploadInputBufferToFirebase({ uid, buffer: fileBuf2, contentType: fileType2 }); storagePath2 = up2.storagePath; uploadedInputPaths.push(storagePath2); } catch { /* second image optional */ }
         }
         if (!storagePath) {
             logJSON('img2img.invalid', { reason: 'no_image', hasFile: !!uf, files: (req.files || []).map(f => f.fieldname) });
@@ -246,10 +253,20 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
             } catch (_) { /* soft-fail moderation */ }
         }
 
-        // Credits: fixed 20 per single image for img2img nano-banana
-        const pricePerImage = 20;
-        const requestedImages = 1;
-        const cost = pricePerImage * requestedImages;
+        // Pricing via pricingResolver with coupon support; fallback preserved
+        let pricePerImage = 30;
+        let requestedImages = 1;
+        let cost = pricePerImage * requestedImages;
+        try {
+            const coup = String(body.couponCode || body.coupon || input.couponCode || input.coupon || '').trim() || null;
+            const resv = await resolvePrice({ modelKey, operation: 'img2img', userPlanId: null, couponCode: coup, context: { scope: 'models' } });
+            pricePerImage = Number(resv.pricePerImageFinal || 0) || 30;
+            requestedImages = 1;
+            cost = Math.max(0, pricePerImage * requestedImages);
+            try { logJSON('pricing.resolve', { modelKey, op: 'img2img', base: resv.base, final: resv.pricePerImageFinal, notes: resv.notes || [], coupon: resv.couponApplied || null }); } catch { }
+        } catch (_) {
+            pricePerImage = 30; requestedImages = 1; cost = pricePerImage * requestedImages;
+        }
         try {
             const have = await credits.getUserCredits(uid);
             const haveImg = Number(have.image || 0);
@@ -286,6 +303,13 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
 
         // Create job with pricing metadata
         const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages });
+        try { logJSON('hold.create', { uid, jobId: job._id, pricePerImage, requestedImages, cost }); } catch { }
+        // Record input storage paths on the job for cleanup scheduling upon success
+        try {
+            if (uploadedInputPaths.length) {
+                await jobs.updateJob(job._id, { inputUploadedPaths: uploadedInputPaths });
+            }
+        } catch (_) { /* non-fatal */ }
 
         // imageGenerations doc
         try {

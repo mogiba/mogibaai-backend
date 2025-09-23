@@ -6,6 +6,8 @@ const { resolveLatestVersion } = require('../services/replicateService');
 const { getDimensions } = require('../utils/sizeMapper');
 const jobs = require('../services/jobService');
 const credits = require('../services/creditsService');
+const { resolvePrice } = require('../services/pricingResolver');
+const pricing = require('../services/pricingService');
 const { db, admin } = require('../utils/firebaseUtils');
 const { moderateInput, logModerationEvent } = require('../lib/moderation');
 
@@ -103,10 +105,10 @@ router.post('/txt2img', requireAuth, async (req, res) => {
         const v = moderateInput({ prompt: (inputs.prompt || rootPrompt || ''), negative_prompt: '', width: inputs.width, height: inputs.height });
         if (!v.ok) { await logModerationEvent({ uid, jobId: null, code: v.code, reason: v.reason, prompt: inputs.prompt || '' }); return res.status(422).json({ ok: false, error: 'MODERATION_BLOCKED', reason: v.reason }); }
 
-        // Pricing and holds
+        // Pricing and holds via pricingResolver; fallback preserved
         let pricePerImage = Number(model.cost || 1);
         let requestedImages = 1;
-        let cost = pricePerImage; // fallback
+        let cost = pricePerImage; // will be replaced after building replicate input
 
         // Build inputs per model
         let replicateInput = {};
@@ -134,11 +136,19 @@ router.post('/txt2img', requireAuth, async (req, res) => {
             } catch (ve) {
                 return res.status(422).json({ ok: false, error: 'INVALID_INPUT', message: ve?.message });
             }
-            // Pricing per image for 2K/4K/non-custom
             const finalSize = replicateInput.size;
-            pricePerImage = (finalSize === '4K') ? 48 : 24; // treat anything not 4K as 2K pricing
-            requestedImages = replicateInput.max_images;
-            cost = pricePerImage * requestedImages;
+            try {
+                const coup = String(body.couponCode || body.coupon || '').trim() || null;
+                const resv = await resolvePrice({ modelKey, operation: 'txt2img', userPlanId: null, couponCode: coup, context: { size: finalSize, scope: 'models' } });
+                pricePerImage = Number(resv.pricePerImageFinal || 0) || ((finalSize === '4K') ? 48 : 24);
+                requestedImages = replicateInput.max_images;
+                cost = Math.max(0, pricePerImage * requestedImages);
+                try { logJSON('pricing.resolve', { modelKey, op: 'txt2img', size: finalSize, base: resv.base, final: resv.pricePerImageFinal, notes: resv.notes || [], coupon: resv.couponApplied || null }); } catch { }
+            } catch (_) {
+                pricePerImage = (finalSize === '4K') ? 48 : 24; // fallback
+                requestedImages = replicateInput.max_images;
+                cost = pricePerImage * requestedImages;
+            }
             metaAspect = replicateInput.aspect_ratio || 'match_input_image';
             metaSize = (replicateInput.size === '4K') ? '4K' : '2K';
         } else if (modelKey === 'sdxl' || modelKey === 'nano-banana') {
@@ -154,15 +164,25 @@ router.post('/txt2img', requireAuth, async (req, res) => {
                 const s = Number(body.seed || inputs.seed);
                 if (!Number.isNaN(s)) replicateInput.seed = s;
             }
-            if (modelKey === 'sdxl') pricePerImage = 6;
-            if (modelKey === 'nano-banana') pricePerImage = 12;
-            requestedImages = 1; cost = pricePerImage * requestedImages;
+            try {
+                const coup = String(body.couponCode || body.coupon || '').trim() || null;
+                // First, base price from admin config with quality
+                let baseP = 1;
+                try { baseP = await pricing.getTxt2ImgPrice({ modelKey, options: { size: sizeStr, quality } }); } catch { baseP = 1; }
+                const resv = await resolvePrice({ modelKey, operation: 'txt2img', userPlanId: null, couponCode: coup, context: { size: sizeStr, quality, scope: 'models', base: baseP } });
+                pricePerImage = Number(resv.pricePerImageFinal || 0) || baseP || (modelKey === 'sdxl' ? 6 : (modelKey === 'nano-banana' ? 12 : 1));
+                requestedImages = 1; cost = Math.max(0, pricePerImage * requestedImages);
+                try { logJSON('pricing.resolve', { modelKey, op: 'txt2img', size: sizeStr, base: resv.base, final: resv.pricePerImageFinal, notes: resv.notes || [], coupon: resv.couponApplied || null }); } catch { }
+            } catch (_) {
+                try { pricePerImage = await pricing.getTxt2ImgPrice({ modelKey, options: { size: sizeStr, quality } }); } catch { pricePerImage = (modelKey === 'sdxl') ? 30 : 20; }
+                requestedImages = 1; cost = pricePerImage * requestedImages;
+            }
             metaAspect = sizeStr; metaSize = sizeStr;
         } else {
             return res.status(400).json({ ok: false, error: 'MODEL_NOT_SUPPORTED' });
         }
 
-        // Verify credits sufficient to place hold
+        // Verify credits sufficient to place hold (requestedImages * pricePerImage)
         try {
             const have = await credits.getUserCredits(uid);
             const haveImg = Number(have.image || 0);
@@ -174,6 +194,7 @@ router.post('/txt2img', requireAuth, async (req, res) => {
 
         // Create job and enqueue prediction
         const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages });
+        try { logJSON('hold.create', { uid, jobId: job._id, pricePerImage, requestedImages, cost }); } catch { }
 
         // Create imageGenerations/{jobId} document with required fields (rules: uid must equal auth.uid)
         try {

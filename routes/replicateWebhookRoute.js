@@ -152,6 +152,22 @@ async function handleReplicateWebhook(req, res) {
 
         console.log('[webhook] stored', { uid: job.userId, jobId: job._id, outputs: billedImages });
 
+        // Schedule deletion of user-uploaded input images 1 hour after success
+        try {
+            const parent = await jobs.getJob(job._id);
+            const inputs = Array.isArray(parent?.inputUploadedPaths) ? parent.inputUploadedPaths : [];
+            if (inputs.length) {
+                const when = new Date(Date.now() + 60 * 60 * 1000);
+                const batch = db.batch();
+                inputs.forEach((p) => {
+                    const ref = db.collection('cleanupQueue').doc();
+                    batch.set(ref, { kind: 'delete_storage', storagePath: p, reason: 'img2img_input_auto_delete_1h', runAfter: when, createdAt: new Date(), uid: parent.userId, jobId: parent._id });
+                });
+                await batch.commit();
+                console.log('[webhook] scheduled input cleanup', { jobId: job._id, count: inputs.length });
+            }
+        } catch (e) { console.warn('[webhook] schedule cleanup failed', e && e.message); }
+
         // Optional post-process chaining
         const parent = await jobs.getJob(job._id);
         const pp = parent?.postprocess || {};

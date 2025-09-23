@@ -80,20 +80,29 @@ process.env.GOOGLE_APPLICATION_CREDENTIALS = saKeyPath;
 
 // --- Resolve Storage key (OPTIONAL) ---
 const CANDIDATE_STORAGE_ETC = "/etc/secrets/mogibaa-storage-key.json";
-const LOCAL_STORAGE = path.join(
-  __dirname,
-  "secrets",
-  "mogibaa-storage-key.json",
-);
+let LOCAL_STORAGE = path.join(__dirname, 'secrets', 'mogibaa-storage-key.json');
+try {
+  const alt = path.join(__dirname, 'secrets', 'mogibaai-storage-key.json');
+  if (fs.existsSync(alt)) LOCAL_STORAGE = alt;
+} catch { }
 
 let storageKeyPath = "";
-if (fs.existsSync(CANDIDATE_STORAGE_ETC))
+if (fs.existsSync(CANDIDATE_STORAGE_ETC)) {
   storageKeyPath = CANDIDATE_STORAGE_ETC;
-else if (fs.existsSync(LOCAL_STORAGE)) storageKeyPath = LOCAL_STORAGE;
+} else if (fs.existsSync(LOCAL_STORAGE)) {
+  storageKeyPath = LOCAL_STORAGE;
+}
 
 if (storageKeyPath) {
   console.log(`✅ Storage key found at ${storageKeyPath}`);
   process.env.GOOGLE_STORAGE_KEY = storageKeyPath;
+  try {
+    const sk = JSON.parse(fs.readFileSync(storageKeyPath, 'utf8'));
+    if (!process.env.FIREBASE_STORAGE_BUCKET) {
+      const proj = sk.project_id;
+      if (proj) process.env.FIREBASE_STORAGE_BUCKET = `${proj}.appspot.com`;
+    }
+  } catch { }
 } else {
   console.warn(
     "⚠️  Storage key file NOT found (OK). Will infer bucket from env or service account.",
@@ -206,10 +215,19 @@ app.use((req, res, next) => {
 // Global middleware for the rest
 app.use(express.json({ limit: "20mb" }));
 
+// Public static for tmp uploads (used as fallback when storage bucket is unavailable)
+try {
+  const TMP_DIR = path.join(__dirname, 'tmp_uploads');
+  if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+  app.use('/tmp-uploads', express.static(TMP_DIR, { maxAge: '3600' }));
+  console.log('[static] Serving tmp uploads at /tmp-uploads');
+} catch (e) { console.warn('[static] Failed to mount tmp uploads:', e && e.message); }
+
 // === Routes ===
 const plansRoute = require("./routes/plansRoute");
 const creditsRoute = require("./routes/creditsRoute");
 const paymentsRoute = require("./routes/paymentsRoute"); // /api/payments/razorpay
+const pricingRoute = require("./routes/pricingRoute");
 
 let gptRoute = null;
 try {
@@ -220,6 +238,7 @@ try {
 const userRoute = require("./routes/userRoute");
 const adminRoute = require("./routes/adminRoute");
 const adminUsersRoute = require("./routes/adminUsersRoute");
+const adminPricingRoute = require("./routes/adminPricingRoute");
 
 // Health
 app.get("/health", (req, res) =>
@@ -228,18 +247,57 @@ app.get("/health", (req, res) =>
 app.get("/api/health", (req, res) =>
   res.json({ status: "ok", message: "Backend is live! (api/health)" }),
 );
+// Pricing health: config/model readability and cache status
+app.get('/api/health/pricing', async (req, res) => {
+  const checks = { configRead: { ok: false }, modelRead: { ok: false }, cache: { ok: false } };
+  try {
+    const { db } = require('./utils/firebaseUtils');
+    const cfgDoc = await db.collection('config').doc('pricing').get().catch((e) => ({ exists: false, data: () => null, __err: e }));
+    const exists = !!(cfgDoc && cfgDoc.exists);
+    let updatedAtMs = null;
+    try {
+      const data = exists ? (cfgDoc.data() || {}) : null;
+      const u = data && (data.updatedAt || data.updated_at);
+      const toMs = (t) => t ? (typeof t.toDate === 'function' ? t.toDate().getTime() : new Date(t).getTime()) : null;
+      updatedAtMs = toMs(u);
+    } catch { }
+    checks.configRead = { ok: exists, exists, updatedAtMs };
+  } catch (e) {
+    checks.configRead = { ok: false, error: e?.message };
+  }
+  try {
+    const { db } = require('./utils/firebaseUtils');
+    const snap = await db.collection('models').limit(1).get().catch((e) => ({ empty: true, size: 0, __err: e }));
+    const count = (snap && typeof snap.size === 'number') ? snap.size : 0;
+    checks.modelRead = { ok: count >= 0, count };
+  } catch (e) {
+    checks.modelRead = { ok: false, error: e?.message };
+  }
+  try {
+    const pricing = require('./services/pricingService');
+    const info = typeof pricing.cacheInfo === 'function' ? pricing.cacheInfo() : null;
+    const ageMs = info && typeof info.ageMs === 'number' ? info.ageMs : null;
+    const ttlMs = info && typeof info.ttlMs === 'number' ? info.ttlMs : null;
+    const stale = info && typeof info.stale === 'boolean' ? info.stale : null;
+    checks.cache = { ok: stale === false, status: stale === false ? 'ok' : 'stale', ageMs, ttlMs };
+  } catch (e) {
+    checks.cache = { ok: false, error: e?.message };
+  }
+  return res.json({ ok: true, checks });
+});
 app.get("/", (req, res) => res.send("Mogibaa backend is running!"));
 
 // Features discovery for frontend gating
 app.get('/api/features', (req, res) => {
   const STORAGE_BACKEND = process.env.STORAGE_BACKEND || 'firebase';
-  res.json({ ok: true, features: { FEATURE_REPLICATE_IMG2IMG, STORAGE_BACKEND } });
+  res.json({ ok: true, features: { FEATURE_REPLICATE_IMG2IMG, STORAGE_BACKEND, PRICING_CONFIG: true } });
 });
 
 // Mount
 app.use("/api/plans", plansRoute);
 app.use("/api/credits", creditsRoute);
 app.use("/api/payments/razorpay", paymentsRoute);
+app.use("/api/pricing", pricingRoute);
 // Replicate routes (non-webhook endpoints) can mount after JSON
 const replicateWebhookRoute = require('./routes/replicateWebhookRoute');
 app.use('/api/replicate', replicateWebhookRoute);
@@ -270,6 +328,7 @@ if (gptRoute) app.use("/api/gpt", gptRoute);
 app.use("/api/user", userRoute);
 app.use("/api/admin", adminRoute);
 app.use("/api/admin/users", adminUsersRoute);
+app.use("/api/admin", adminPricingRoute);
 
 // Start
 const PORT = process.env.PORT || 4000;

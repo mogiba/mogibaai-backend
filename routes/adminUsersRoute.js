@@ -318,3 +318,30 @@ router.get('/metrics', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+
+// Moderator role management
+router.post('/:id/promote-moderator', requireAdmin, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const user = await getAuth().getUser(id);
+        const claims = user.customClaims || {};
+        if (claims.moderator === true) return res.json({ ok: true, already: true });
+        const nextClaims = { ...claims, moderator: true };
+        await getAuth().setCustomUserClaims(id, nextClaims);
+        await db.collection('activities').add({ userId: id, action: 'admin.promote.moderator', resource: 'user', meta: { promotedBy: req.adminUid }, timestamp: new Date(), adminId: req.adminUid });
+        return res.json({ ok: true });
+    } catch (e) { return res.status(500).json({ ok: false, error: 'PROMOTE_FAILED' }); }
+});
+
+router.post('/:id/demote-moderator', requireAdmin, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const user = await getAuth().getUser(id);
+        const claims = user.customClaims || {};
+        if (!claims.moderator) return res.json({ ok: true, already: true });
+        const nextClaims = { ...claims }; delete nextClaims.moderator;
+        await getAuth().setCustomUserClaims(id, nextClaims);
+        await db.collection('activities').add({ userId: id, action: 'admin.demote.moderator', resource: 'user', meta: { demotedBy: req.adminUid }, timestamp: new Date(), adminId: req.adminUid });
+        return res.json({ ok: true });
+    } catch (e) { return res.status(500).json({ ok: false, error: 'DEMOTE_FAILED' }); }
+});

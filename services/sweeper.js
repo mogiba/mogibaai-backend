@@ -1,4 +1,5 @@
 const { db } = require('../utils/firebaseUtils');
+const { deleteObject } = require('../utils/firebaseUtils');
 const rpl = require('./replicateService');
 const jobs = require('./jobService');
 
@@ -38,6 +39,31 @@ async function sweepOnce({ cutoffMs = 30 * 60 * 1000 } = {}) {
         } catch (e) {
             logJSON('sweeper.query.error', { status: st, msg: e?.message });
         }
+    }
+    // Cleanup user-uploaded inputs scheduled for deletion
+    try {
+        const now = new Date();
+        const snap = await db.collection('cleanupQueue').where('runAfter', '<=', now).limit(50).get();
+        if (!snap.empty) {
+            for (const d of snap.docs) {
+                const item = d.data();
+                if (item.kind === 'delete_storage' && item.storagePath) {
+                    try {
+                        await deleteObject(item.storagePath);
+                        await d.ref.delete();
+                        processed += 1;
+                        logJSON('sweeper.cleanup.deleted', { storagePath: item.storagePath });
+                    } catch (e) {
+                        logJSON('sweeper.cleanup.error', { storagePath: item.storagePath, msg: e?.message });
+                    }
+                } else {
+                    // Unknown task, drop to avoid pile-up
+                    await d.ref.delete().catch(() => null);
+                }
+            }
+        }
+    } catch (e) {
+        logJSON('sweeper.cleanup.query.error', { msg: e?.message });
     }
     return { processed };
 }

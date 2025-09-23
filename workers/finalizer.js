@@ -214,6 +214,22 @@ async function finalizePrediction({ uid, jobId, predId }) {
 
         console.log('[finalizer] stored', { uid, jobId, outputs: urls.length });
         console.log('[finalizer] wrote', { uid, jobId, count: urls.length });
+
+        // Schedule deletion of user-uploaded input images 1 hour after success (no-webhook path)
+        try {
+            const parent = await jobs.getJob(jobId);
+            const inputs = Array.isArray(parent?.inputUploadedPaths) ? parent.inputUploadedPaths : [];
+            if (inputs.length) {
+                const when = new Date(Date.now() + 60 * 60 * 1000);
+                const batch = db.batch();
+                inputs.forEach((p) => {
+                    const ref = db.collection('cleanupQueue').doc();
+                    batch.set(ref, { kind: 'delete_storage', storagePath: p, reason: 'img2img_input_auto_delete_1h', runAfter: when, createdAt: new Date(), uid, jobId });
+                });
+                await batch.commit();
+                console.log('[finalizer] scheduled input cleanup', { jobId, count: inputs.length });
+            }
+        } catch (e) { console.warn('[finalizer] schedule cleanup failed', e && e.message); }
         return { ok: true, outputs: urls.length };
     } catch (e) {
         await db.collection('imageGenerations').doc(jobId).set({ status: 'failed', error: e?.message || String(e), updatedAt: new Date() }, { merge: true });
