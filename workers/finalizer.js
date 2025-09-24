@@ -187,6 +187,7 @@ async function finalizePrediction({ uid, jobId, predId }) {
 
         // Update job status + capture credits hold
         try {
+            const { writeLedgerEntry } = require('../services/creditsLedgerService');
             const billedImages = Array.isArray(outputEntries) ? outputEntries.length : 0;
             const hasPerImage = parentJob && Number.isFinite(Number(parentJob.pricePerImage));
             if (hasPerImage) {
@@ -194,23 +195,35 @@ async function finalizePrediction({ uid, jobId, predId }) {
                 const totalDebited = Math.max(0, billedImages * ppi);
                 await jobs.updateJob(jobId, { status: 'succeeded', output: outputEntries, stored: true, billedImages, totalDebited });
                 if (totalDebited > 0) {
-                    await jobs.ensureDebitOnce({ jobId, userId: uid, category: 'image', cost: totalDebited }).catch(() => null);
-                    let remaining = null;
-                    try { const have = await require('../services/creditsService').getUserCredits(uid); remaining = have?.image ?? null; } catch { remaining = null; }
-                    await jobs.finalizeHold(jobId, 'captured', { pricePerImage: ppi, billedImages, totalDebited, remainingBalance: remaining }).catch(() => null);
-                } else {
-                    await jobs.finalizeHold(jobId, 'released_nothing_to_bill').catch(() => null);
+                    // Ledger debit (idempotent per job)
+                    await writeLedgerEntry({
+                        uid,
+                        type: 'image',
+                        direction: 'debit',
+                        amount: totalDebited,
+                        source: parentJob?.model === 'img2img' ? 'image2image' : 'text2image',
+                        reason: `${parentJob?.model || 'model'} generation`,
+                        jobId,
+                        meta: { modelKey: parentJob?.model || null, resolution: parentJob?.input?.size || null },
+                        idempotencyKey: `debit:${parentJob?.model === 'img2img' ? 'image2image' : 'text2image'}:${jobId}`,
+                    }).catch((e) => { console.warn('[finalizer] ledger debit failed', e?.message); });
                 }
             } else {
                 await jobs.updateJob(jobId, { status: 'succeeded', output: outputEntries, stored: true });
                 const cost = parentJob?.cost || 1;
-                await jobs.ensureDebitOnce({ jobId, userId: uid, category: 'image', cost }).catch(() => null);
-                let remaining = null; try { const have = await require('../services/creditsService').getUserCredits(uid); remaining = have?.image ?? null; } catch { remaining = null; }
-                await jobs.finalizeHold(jobId, 'captured', { price: cost, remainingBalance: remaining }).catch(() => null);
+                await writeLedgerEntry({
+                    uid,
+                    type: 'image',
+                    direction: 'debit',
+                    amount: cost,
+                    source: parentJob?.model === 'img2img' ? 'image2image' : 'text2image',
+                    reason: `${parentJob?.model || 'model'} generation`,
+                    jobId,
+                    meta: { modelKey: parentJob?.model || null, resolution: parentJob?.input?.size || null },
+                    idempotencyKey: `debit:${parentJob?.model === 'img2img' ? 'image2image' : 'text2image'}:${jobId}`,
+                }).catch((e) => { console.warn('[finalizer] ledger debit failed', e?.message); });
             }
-        } catch (e) {
-            console.warn('[finalizer] failed updating job/billing', e?.message || String(e));
-        }
+        } catch (e) { console.warn('[finalizer] failed updating job/billing (ledger)', e?.message || String(e)); }
 
         console.log('[finalizer] stored', { uid, jobId, outputs: urls.length });
         console.log('[finalizer] wrote', { uid, jobId, count: urls.length });

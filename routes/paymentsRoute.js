@@ -278,6 +278,20 @@ router.post("/verify", express.json(), requireAuth, async (req, res) => {
     }
 
     await ref.set({ status: 'paid', paymentId, verifiedAt: new Date(), credited: true }, { merge: true });
+    try {
+      const { writeLedgerEntry } = require('../services/creditsLedgerService');
+      await writeLedgerEntry({
+        uid,
+        type: ord.category || 'image',
+        direction: 'credit',
+        amount: ord.credits || 0,
+        source: 'purchase',
+        reason: `${ord.planId || 'topup'} plan top-up`,
+        paymentId,
+        meta: { orderId },
+        idempotencyKey: `credit:purchase:${paymentId}`,
+      });
+    } catch (e) { console.warn('[payments.verify] ledger credit failed', e?.message); }
     await creditsService.addCredits(uid, ord.category || 'image', ord.credits || 0, { source: 'razorpay', orderId, paymentId });
     res.json({ ok: true });
   } catch (e) {
@@ -464,6 +478,20 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
             webhookAt: new Date(),
             credited: true,
           }, { merge: true });
+          try {
+            const { writeLedgerEntry } = require('../services/creditsLedgerService');
+            await writeLedgerEntry({
+              uid,
+              type: category,
+              direction: 'credit',
+              amount: credits,
+              source: 'purchase',
+              reason: `${planId || 'topup'} plan top-up`,
+              paymentId: pay?.id,
+              meta: { orderId },
+              idempotencyKey: `credit:purchase:${pay?.id}`,
+            });
+          } catch (e) { console.warn('[payments.webhook] ledger credit failed', e?.message); }
           await creditsService.addCredits(uid, category, credits, { source: 'razorpay:webhook', orderId, paymentId: pay?.id });
           await ensureUserPlanFields();
           if (couponCode) await redeemCouponOnce({ orderId, couponCode });

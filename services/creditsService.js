@@ -133,6 +133,26 @@ async function addCredits(uid, category, qty, meta) {
     return after;
   });
 
+  // Also mirror into unified credits ledger unless already recorded by a higher-level flow.
+  try {
+    const { writeLedgerEntry } = require('./creditsLedgerService');
+    const srcHint = meta && meta.source ? String(meta.source) : '';
+    // Skip if this looks like a Razorpay purchase/webhook (those already wrote ledger entries) to avoid double counting
+    const looksLikePurchase = /razorpay|purchase|webhook/i.test(srcHint) || (meta && (meta.orderId || meta.paymentId));
+    if (!looksLikePurchase && normQty(qty) > 0) {
+      await writeLedgerEntry({
+        uid,
+        type: cat,
+        direction: 'credit',
+        amount: normQty(qty),
+        source: 'admin_adjustment',
+        reason: (meta && meta.reason) || 'manual credit',
+        meta: meta || null,
+        idempotencyKey: `legacy_add:${cat}:${uid}:${Date.now()}`,
+      }).catch(() => { });
+    }
+  } catch (_) { /* ignore ledger mirror errors */ }
+
   return out;
 }
 

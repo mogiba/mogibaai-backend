@@ -16,8 +16,8 @@ const { moderateImageBuffer } = require('../lib/moderation');
 const { uploadInputBufferToFirebase } = require('../services/outputStore');
 
 const router = express.Router();
-// Only allow this model for Image-to-Image
-const ALLOWED_IMG2IMG_MODELS = new Set(['nano-banana', 'nanobanana']);
+// Allowed models for Image-to-Image (nano-banana remains default; seedream4 added without altering existing logic)
+const ALLOWED_IMG2IMG_MODELS = new Set(['nano-banana', 'nanobanana', 'seedream4']);
 // Route-level CORS (permissive) to avoid dev preflight issues
 router.options('/img2img', cors({ origin: true, credentials: true }));
 router.options('/img2img/:id', cors({ origin: true, credentials: true }));
@@ -253,19 +253,59 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
             } catch (_) { /* soft-fail moderation */ }
         }
 
-        // Pricing via pricingResolver with coupon support; fallback preserved
+        // Pricing (seedream4 has resolution-based 2K/4K pricing; nano-banana uses existing resolver)
         let pricePerImage = 30;
         let requestedImages = 1;
-        let cost = pricePerImage * requestedImages;
-        try {
-            const coup = String(body.couponCode || body.coupon || input.couponCode || input.coupon || '').trim() || null;
-            const resv = await resolvePrice({ modelKey, operation: 'img2img', userPlanId: null, couponCode: coup, context: { scope: 'models' } });
-            pricePerImage = Number(resv.pricePerImageFinal || 0) || 30;
+        let cost = pricePerImage;
+        let seedreamResolution = null; // '2K' | '4K'
+        if (modelKey === 'seedream4') {
+            // Derive resolution from explicit input.resolution OR width/height intended values
+            const explicitRes = (input.resolution || input.size || '').toString().toUpperCase();
+            if (explicitRes === '4K') seedreamResolution = '4K';
+            else if (explicitRes === '2K') seedreamResolution = '2K';
+            else {
+                // Fallback from width/height thresholds
+                const w = Number(input.width) || 0; const h = Number(input.height) || 0;
+                seedreamResolution = (w >= 4096 || h >= 4096) ? '4K' : '2K';
+            }
+            // Enforce canonical width/height if not provided or out-of-range
+            if (!Number.isFinite(Number(input.width)) || !Number.isFinite(Number(input.height))) {
+                if (seedreamResolution === '4K') { input.width = 4096; input.height = 4096; }
+                else { input.width = 2048; input.height = 2048; }
+            }
+            // Attempt to fetch per-resolution overrides from models doc (fields: i2i2k, i2i4k)
+            let price2k = 20; let price4k = 40;
+            try {
+                const ms = await db.collection('models').doc('seedream4').get();
+                if (ms.exists) {
+                    const md = ms.data() || {};
+                    if (Number.isFinite(Number(md.i2i2k))) price2k = Number(md.i2i2k);
+                    if (Number.isFinite(Number(md.i2i4k))) price4k = Number(md.i2i4k);
+                }
+            } catch { /* ignore */ }
+            pricePerImage = seedreamResolution === '4K' ? price4k : price2k;
             requestedImages = 1;
-            cost = Math.max(0, pricePerImage * requestedImages);
-            try { logJSON('pricing.resolve', { modelKey, op: 'img2img', base: resv.base, final: resv.pricePerImageFinal, notes: resv.notes || [], coupon: resv.couponApplied || null }); } catch { }
-        } catch (_) {
-            pricePerImage = 30; requestedImages = 1; cost = pricePerImage * requestedImages;
+            cost = pricePerImage;
+            // Allow coupons: pass base via resolvePrice for potential discounting
+            try {
+                const coup = String(body.couponCode || body.coupon || input.couponCode || input.coupon || '').trim() || null;
+                const resv = await resolvePrice({ modelKey, operation: 'img2img', userPlanId: null, couponCode: coup, context: { scope: 'models', base: pricePerImage, resolution: seedreamResolution } });
+                pricePerImage = Number(resv.pricePerImageFinal || pricePerImage) || pricePerImage;
+                cost = pricePerImage;
+                try { logJSON('pricing.resolve', { modelKey, op: 'img2img', base: resv.base, final: resv.pricePerImageFinal, res: seedreamResolution, notes: resv.notes || [], coupon: resv.couponApplied || null }); } catch { }
+            } catch (_) { /* keep fallback */ }
+        } else {
+            // Existing path (nano-banana etc.)
+            try {
+                const coup = String(body.couponCode || body.coupon || input.couponCode || input.coupon || '').trim() || null;
+                const resv = await resolvePrice({ modelKey, operation: 'img2img', userPlanId: null, couponCode: coup, context: { scope: 'models' } });
+                pricePerImage = Number(resv.pricePerImageFinal || 0) || 30;
+                requestedImages = 1;
+                cost = Math.max(0, pricePerImage * requestedImages);
+                try { logJSON('pricing.resolve', { modelKey, op: 'img2img', base: resv.base, final: resv.pricePerImageFinal, notes: resv.notes || [], coupon: resv.couponApplied || null }); } catch { }
+            } catch (_) {
+                pricePerImage = 30; requestedImages = 1; cost = pricePerImage * requestedImages;
+            }
         }
         try {
             const have = await credits.getUserCredits(uid);
@@ -289,7 +329,7 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         if (Number.isFinite(height)) height = Math.max(64, Math.min(4096, Math.floor(height)));
         else height = undefined;
         const replicateInput = { prompt: promptStr };
-        // nano-banana uses image_input (array) + output_format
+        // nano-banana & seedream4 both use image_input (array) + output_format
         const imgArr = [signedUrlObj.url];
         if (signedUrlObj2 && signedUrlObj2.url) imgArr.push(signedUrlObj2.url);
         replicateInput.image_input = imgArr;
@@ -302,6 +342,10 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         if (typeof input.strength !== 'undefined') replicateInput.strength = strength;
 
         // Create job with pricing metadata
+        // For seedream4 include resolution tag in job meta input
+        if (modelKey === 'seedream4' && seedreamResolution) {
+            replicateInput.resolution = seedreamResolution;
+        }
         const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages });
         try { logJSON('hold.create', { uid, jobId: job._id, pricePerImage, requestedImages, cost }); } catch { }
         // Record input storage paths on the job for cleanup scheduling upon success

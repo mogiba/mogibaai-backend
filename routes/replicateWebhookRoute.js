@@ -114,25 +114,40 @@ async function handleReplicateWebhook(req, res) {
         }
         const billedImages = Array.isArray(storedOutputs) ? storedOutputs.length : 0;
         const hasPerImage = Number.isFinite(Number(job.pricePerImage));
-        if (hasPerImage) {
-            const ppi = Number(job.pricePerImage || 0);
-            const totalDebited = Math.max(0, billedImages * ppi);
-            await jobs.updateJob(job._id, { status: 'succeeded', output: storedOutputs, stored: storedAny, billedImages, totalDebited, webhookReceivedAt: new Date() });
-            if (totalDebited > 0) {
-                await jobs.ensureDebitOnce({ jobId: job._id, userId: job.userId, category: 'image', cost: totalDebited }).catch(() => null);
-                let remaining = null;
-                try { const have = await credits.getUserCredits(job.userId); remaining = have?.image ?? null; } catch { remaining = null; }
-                await jobs.finalizeHold(job._id, 'captured', { pricePerImage: ppi, billedImages, totalDebited, remainingBalance: remaining }).catch(() => null);
+        try {
+            const { writeLedgerEntry } = require('../services/creditsLedgerService');
+            if (hasPerImage) {
+                const ppi = Number(job.pricePerImage || 0);
+                const totalDebited = Math.max(0, billedImages * ppi);
+                await jobs.updateJob(job._id, { status: 'succeeded', output: storedOutputs, stored: storedAny, billedImages, totalDebited, webhookReceivedAt: new Date() });
+                if (totalDebited > 0) {
+                    await writeLedgerEntry({
+                        uid: job.userId,
+                        type: 'image',
+                        direction: 'debit',
+                        amount: totalDebited,
+                        source: job.model === 'img2img' ? 'image2image' : 'text2image',
+                        reason: `${job.model || 'model'} generation`,
+                        jobId: job._id,
+                        meta: { modelKey: job.model || null, resolution: job?.input?.size || null },
+                        idempotencyKey: `debit:${job.model === 'img2img' ? 'image2image' : 'text2image'}:${job._id}`,
+                    }).catch(e => console.warn('[webhook] ledger debit failed', e?.message));
+                }
             } else {
-                await jobs.finalizeHold(job._id, 'released_nothing_to_bill').catch(() => null);
+                await jobs.updateJob(job._id, { status: 'succeeded', output: storedOutputs, stored: storedAny, webhookReceivedAt: new Date() });
+                await writeLedgerEntry({
+                    uid: job.userId,
+                    type: 'image',
+                    direction: 'debit',
+                    amount: job.cost || 1,
+                    source: job.model === 'img2img' ? 'image2image' : 'text2image',
+                    reason: `${job.model || 'model'} generation`,
+                    jobId: job._id,
+                    meta: { modelKey: job.model || null, resolution: job?.input?.size || null },
+                    idempotencyKey: `debit:${job.model === 'img2img' ? 'image2image' : 'text2image'}:${job._id}`,
+                }).catch(e => console.warn('[webhook] ledger debit failed', e?.message));
             }
-        } else {
-            await jobs.updateJob(job._id, { status: 'succeeded', output: storedOutputs, stored: storedAny, webhookReceivedAt: new Date() });
-            await jobs.ensureDebitOnce({ jobId: job._id, userId: job.userId, category: 'image', cost: job.cost || 1 }).catch(() => null);
-            let remaining = null;
-            try { const have = await credits.getUserCredits(job.userId); remaining = have?.image ?? null; } catch { remaining = null; }
-            await jobs.finalizeHold(job._id, 'captured', { price: job.cost || 1, remainingBalance: remaining }).catch(() => null);
-        }
+        } catch (e) { console.warn('[webhook] debit ledger integration failed', e?.message); }
         // Update imageGenerations status and outputs (admin update)
         try {
             await db.collection('imageGenerations').doc(job._id).set({

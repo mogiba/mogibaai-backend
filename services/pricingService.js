@@ -81,9 +81,15 @@ async function getTxt2ImgPrice({ modelKey, options = {} } = {}) {
 }
 
 // Compute price for img2img per image
-async function getImg2ImgPrice({ modelKey } = {}) {
+async function getImg2ImgPrice({ modelKey, options = {} } = {}) {
     const cfg = await loadConfig();
     const m = (modelKey && cfg.models[modelKey]) ? cfg.models[modelKey] : null;
+    if (modelKey === 'seedream4') {
+        const size = String(options.size || '').toUpperCase();
+        const twoK = coerceInt(m?.i2i?.size2K, 20);
+        const fourK = coerceInt(m?.i2i?.size4K, 40);
+        return size === '4K' ? fourK : twoK;
+    }
     // Prefer new schema: numeric i2i at model level
     if (m && typeof m.i2i !== 'undefined') {
         const v = Number(m.i2i);
@@ -125,6 +131,10 @@ async function getPublicPricing() {
                 txt2img: {
                     size2K: coerceInt(cfg.models?.seedream4?.txt2img?.size2K ?? cfg.models?.seedream4?.t2i?.k2, DEFAULTS.models.seedream4.txt2img.size2K),
                     size4K: coerceInt(cfg.models?.seedream4?.txt2img?.size4K ?? cfg.models?.seedream4?.t2i?.k4, DEFAULTS.models.seedream4.txt2img.size4K),
+                },
+                i2i: {
+                    size2K: coerceInt(cfg.models?.seedream4?.i2i?.size2K, 20),
+                    size4K: coerceInt(cfg.models?.seedream4?.i2i?.size4K, 40),
                 },
                 enabled: cfg.models?.seedream4?.enabled !== false,
             },
