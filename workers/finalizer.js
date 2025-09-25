@@ -185,9 +185,10 @@ async function finalizePrediction({ uid, jobId, predId }) {
             await db.collection('imageGenerations').doc(jobId).set({ status: 'succeeded', outputsCount: urls.length, updatedAt: new Date() }, { merge: true });
         } catch (e) { console.warn('[finalizer] failed updating imageGenerations doc', e?.message || String(e)); }
 
-        // Update job status + capture credits hold
+        // Update job status + capture credits hold + legacy credit spend
         try {
             const { writeLedgerEntry } = require('../services/creditsLedgerService');
+            const { ensureDebitOnce } = require('../services/jobService');
             const billedImages = Array.isArray(outputEntries) ? outputEntries.length : 0;
             const hasPerImage = parentJob && Number.isFinite(Number(parentJob.pricePerImage));
             if (hasPerImage) {
@@ -195,6 +196,8 @@ async function finalizePrediction({ uid, jobId, predId }) {
                 const totalDebited = Math.max(0, billedImages * ppi);
                 await jobs.updateJob(jobId, { status: 'succeeded', output: outputEntries, stored: true, billedImages, totalDebited });
                 if (totalDebited > 0) {
+                    // Spend from legacy counters exactly once (idempotent transaction marks job.debited)
+                    try { await ensureDebitOnce({ jobId, userId: uid, category: 'image', cost: totalDebited }); } catch (e) { console.warn('[finalizer] ensureDebitOnce failed', e?.message); }
                     // Ledger debit (idempotent per job)
                     await writeLedgerEntry({
                         uid,
@@ -211,6 +214,9 @@ async function finalizePrediction({ uid, jobId, predId }) {
             } else {
                 await jobs.updateJob(jobId, { status: 'succeeded', output: outputEntries, stored: true });
                 const cost = parentJob?.cost || 1;
+                if (cost > 0) {
+                    try { await ensureDebitOnce({ jobId, userId: uid, category: 'image', cost }); } catch (e) { console.warn('[finalizer] ensureDebitOnce (flat cost) failed', e?.message); }
+                }
                 await writeLedgerEntry({
                     uid,
                     type: 'image',
