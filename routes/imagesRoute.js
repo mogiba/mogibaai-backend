@@ -153,6 +153,15 @@ router.delete('/:id', requireAuth, async (req, res) => {
     const id = req.params.id;
     if (!id) return res.status(400).json({ ok: false, error: 'INVALID_INPUT' });
     try {
+        // Prevent free tier users from deleting (upsell)
+        try {
+            const udoc = await db.collection('users').doc(req.uid).get();
+            const u = udoc.exists ? udoc.data() : {};
+            const tier = (u.subscription && typeof u.subscription === 'object' && u.subscription.tier) || u.plan || (u.isPro ? 'Pro' : 'Free');
+            if (String(tier || '').toLowerCase() === 'free') {
+                return res.status(403).json({ ok: false, error: 'NEED_SUBSCRIPTION', message: 'Upgrade to delete images' });
+            }
+        } catch (_) { /* default allow if lookup fails */ }
         // Prefer unified per-user gallery path
         const userDocRef = db.collection('users').doc(req.uid).collection('images').doc(id);
         const userSnap = await userDocRef.get();

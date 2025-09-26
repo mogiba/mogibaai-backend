@@ -346,7 +346,16 @@ router.post('/img2img', requireAuth, upload.any(), async (req, res) => {
         if (modelKey === 'seedream4' && seedreamResolution) {
             replicateInput.resolution = seedreamResolution;
         }
-        const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages });
+        // Determine if user is on Free tier (enforce watermark)
+        let wm = false;
+        try {
+            const udoc = await db.collection('users').doc(uid).get();
+            const u = udoc.exists ? udoc.data() : {};
+            const tier = (u.subscription && typeof u.subscription === 'object' && u.subscription.tier) || u.plan || (u.isPro ? 'Pro' : 'Free');
+            wm = String(tier || '').toLowerCase() === 'free';
+        } catch (_) { wm = false; }
+
+        const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages, watermark: wm });
         try { logJSON('hold.create', { uid, jobId: job._id, pricePerImage, requestedImages, cost }); } catch { }
         // Record input storage paths on the job for cleanup scheduling upon success
         try {
@@ -443,10 +452,13 @@ router.get('/img2img/:id', requireAuth, async (req, res) => {
     const j = await jobs.getJob(req.params.id);
     if (!j || j.userId !== req.uid) return res.status(404).json({ ok: false, error: 'not_found' });
     let out = Array.isArray(j.output) ? j.output : [];
+    const isFree = Boolean(j.watermark);
     out = out.map((it) => {
         if (typeof it === 'string') return { storagePath: it, filename: it.split('/').pop(), contentType: null, bytes: null };
         const o = it || {};
-        return { storagePath: o.storagePath || null, filename: o.filename || (o.storagePath ? String(o.storagePath).split('/').pop() : null), contentType: o.contentType || null, bytes: o.bytes || null };
+        const chosenPath = isFree && o.wmStoragePath ? o.wmStoragePath : (o.storagePath || null);
+        const fname = o.filename || (chosenPath ? String(chosenPath).split('/').pop() : (o.storagePath ? String(o.storagePath).split('/').pop() : null));
+        return { storagePath: chosenPath, filename: fname, contentType: o.contentType || null, bytes: o.bytes || null };
     });
     res.json({ ok: true, job: { ...j, output: out } });
 });
@@ -469,7 +481,12 @@ router.post('/img2img/:id/share', requireAuth, async (req, res) => {
     const outputs = Array.isArray(j.output) ? j.output : [];
     if (!outputs[fileIndex]) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'output index missing' });
     const outputItem = outputs[fileIndex];
-    const storagePath = typeof outputItem === 'string' ? outputItem : outputItem.storagePath;
+    const isFree = Boolean(j.watermark);
+    let storagePath = null;
+    if (typeof outputItem === 'string') storagePath = outputItem;
+    else {
+        storagePath = isFree && outputItem.wmStoragePath ? outputItem.wmStoragePath : outputItem.storagePath;
+    }
     if (!storagePath) return res.status(400).json({ ok: false, error: 'INVALID_INPUT', message: 'storagePath missing from output' });
 
     // filename from storagePath
@@ -496,6 +513,15 @@ router.delete('/img2img/:id/file', requireAuth, async (req, res) => {
     if (!FEATURE_REPLICATE_IMG2IMG) return res.status(503).json({ ok: false, error: 'feature_disabled' });
     const j = await jobs.getJob(req.params.id);
     if (!j || j.userId !== req.uid) return res.status(404).json({ ok: false, error: 'not_found' });
+    // Prevent free tier users from deleting outputs (upsell)
+    try {
+        const udoc = await db.collection('users').doc(req.uid).get();
+        const u = udoc.exists ? udoc.data() : {};
+        const tier = (u.subscription && typeof u.subscription === 'object' && u.subscription.tier) || u.plan || (u.isPro ? 'Pro' : 'Free');
+        if (String(tier || '').toLowerCase() === 'free') {
+            return res.status(403).json({ ok: false, error: 'NEED_SUBSCRIPTION', message: 'Upgrade to delete images' });
+        }
+    } catch (_) { /* soft-fail */ }
     const { fileIndex = 0 } = req.query || {};
     const idx = Number(fileIndex || 0);
     const outputs = Array.isArray(j.output) ? j.output : [];

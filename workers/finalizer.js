@@ -1,4 +1,5 @@
 const { db, getSignedUrlForPath, admin, bucket, buildOwnerOutputPath } = require('../utils/firebaseUtils');
+const Jimp = require('jimp');
 const axios = require('axios');
 const { /* storeReplicateOutput */ } = require('../services/outputStore');
 const { getPrediction, setReplicateLogContext } = require('../services/replicateService');
@@ -76,12 +77,16 @@ async function finalizePrediction({ uid, jobId, predId }) {
         // Load job to compute billing and to update status later
         let parentJob = null;
         try { parentJob = await jobs.getJob(jobId); } catch (_) { parentJob = null; }
+        const watermarkEnabled = !!(parentJob && parentJob.watermark);
         for (let i = 0; i < urls.length; i++) {
             const sourceUrl = urls[i];
             const fileName = `${jobId}-${i}.png`;
             const storagePath = buildOwnerOutputPath(uid, jobId, fileName);
+            const wmFileName = `${jobId}-${i}_wm.png`;
+            const wmStoragePath = buildOwnerOutputPath(uid, jobId, wmFileName);
             const docId = `${jobId}-${i}`;
             let signed = null;
+            let signedWm = null;
             try {
                 console.log('[finalizer] downloading source image', { index: i, sourceUrl });
                 const resp = await axios.get(sourceUrl, { responseType: 'arraybuffer', timeout: 60000, validateStatus: () => true });
@@ -89,22 +94,56 @@ async function finalizePrediction({ uid, jobId, predId }) {
                 const buf = Buffer.from(resp.data);
                 if (!bucket) {
                     console.warn('[finalizer] bucket missing, skipping upload, will store raw url only');
-                    // record output entry with direct URL only
-                    outputEntries.push({ storagePath: null, filename: fileName, contentType: resp.headers['content-type'] || 'image/png', bytes: buf.length, downloadURL: sourceUrl, sourceUrl });
+                    // record output entry with direct URL only (no watermark possible)
+                    outputEntries.push({ storagePath: null, filename: fileName, contentType: resp.headers['content-type'] || 'image/png', bytes: buf.length, downloadURL: sourceUrl, sourceUrl, wmStoragePath: null, wmDownloadURL: null });
                 } else {
                     const file = bucket.file(storagePath);
                     await file.save(buf, { metadata: { contentType: resp.headers['content-type'] || 'image/png' }, resumable: false, public: false, validation: false });
                     try { const su = await getSignedUrlForPath(storagePath); signed = su?.url || null; } catch { signed = null; }
-                    outputEntries.push({ storagePath, filename: fileName, contentType: resp.headers['content-type'] || 'image/png', bytes: buf.length, downloadURL: signed || null, sourceUrl });
+                    // If watermark required, render a WM variant and upload
+                    if (watermarkEnabled) {
+                        try {
+                            const img = await Jimp.read(buf);
+                            const w = img.bitmap.width;
+                            const logoScale = Math.max(64, Math.floor(w * 0.18));
+                            // Lightweight text watermark fallback (no asset dependency)
+                            const font = await Jimp.loadFont(Jimp.FONT_SANS_32_WHITE);
+                            // Draw semi-transparent box + text at bottom-right
+                            const margin = 20;
+                            const text = 'MOGIBAA.AI';
+                            const textW = Jimp.measureText(font, text);
+                            const textH = Jimp.measureTextHeight(font, text, textW);
+                            const pad = 12;
+                            const boxW = textW + pad * 2;
+                            const boxH = textH + pad * 2;
+                            const x = w - boxW - margin;
+                            const y = img.bitmap.height - boxH - margin;
+                            const overlay = new Jimp(boxW, boxH, 0x00000066);
+                            img.composite(overlay, x, y);
+                            img.print(font, x + pad, y + pad, { text, alignmentX: Jimp.HORIZONTAL_ALIGN_CENTER, alignmentY: Jimp.VERTICAL_ALIGN_MIDDLE }, textW, textH);
+                            const wmBuf = await img.getBufferAsync(Jimp.MIME_PNG);
+                            const wmFile = bucket.file(wmStoragePath);
+                            await wmFile.save(wmBuf, { metadata: { contentType: 'image/png' }, resumable: false, public: false, validation: false });
+                            try { const su2 = await getSignedUrlForPath(wmStoragePath); signedWm = su2?.url || null; } catch { signedWm = null; }
+                        } catch (we) {
+                            console.warn('[finalizer] watermark generation failed; proceeding with original only', we?.message || String(we));
+                        }
+                    }
+                    outputEntries.push({ storagePath, filename: fileName, contentType: resp.headers['content-type'] || 'image/png', bytes: buf.length, downloadURL: signed || null, sourceUrl, wmStoragePath: watermarkEnabled ? wmStoragePath : null, wmDownloadURL: watermarkEnabled ? (signedWm || null) : null });
                 }
+                // For Free plan (watermarkEnabled), primary downloadURL should point to WM variant
+                const primaryDownload = watermarkEnabled ? (signedWm || signed || sourceUrl) : (signed || sourceUrl);
+                const primaryStoragePath = watermarkEnabled ? (bucket ? wmStoragePath : null) : (bucket ? storagePath : null);
                 await db.collection('users').doc(uid).collection('images').doc(docId).set({
                     uid,
                     jobId,
                     index: i,
                     status: 'succeeded',
                     visibility: 'private',
-                    storagePath: bucket ? storagePath : null,
-                    downloadURL: signed || sourceUrl,
+                    storagePath: primaryStoragePath,
+                    downloadURL: primaryDownload,
+                    originalPath: bucket ? storagePath : null,
+                    wmPath: watermarkEnabled && bucket ? wmStoragePath : null,
                     sourceUrl,
                     // Provide prompt & model metadata for UI (GalleryPanel reads prompt/modelKey/tool)
                     prompt: (pred?.input?.prompt) || '',
@@ -120,8 +159,8 @@ async function finalizePrediction({ uid, jobId, predId }) {
                         uid,
                         jobId,
                         status: 'succeeded',
-                        storagePath: bucket ? storagePath : null,
-                        url: signed || sourceUrl,
+                        storagePath: primaryStoragePath,
+                        url: primaryDownload,
                         prompt: (pred?.input?.prompt) || '',
                         tool: (pred?.model || 'seedream4'),
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -131,7 +170,7 @@ async function finalizePrediction({ uid, jobId, predId }) {
                 // Index into global images collection with storagePath (or fallback to sourceUrl)
                 try {
                     const { recordImageDoc } = require('../utils/firebaseUtils');
-                    await recordImageDoc({ uid, jobId, storagePath: bucket ? storagePath : sourceUrl, modelKey: 'seedream4', prompt: (pred?.input?.prompt) || '', size: null, aspect_ratio: null });
+                    await recordImageDoc({ uid, jobId, storagePath: bucket ? (primaryStoragePath || storagePath) : sourceUrl, modelKey: 'seedream4', prompt: (pred?.input?.prompt) || '', size: null, aspect_ratio: null });
                     console.log('[finalizer] recordImageDoc ok', { docId });
                 } catch (e) {
                     console.warn('[finalizer] recordImageDoc failed', { docId, error: e?.message || String(e) });
@@ -150,13 +189,15 @@ async function finalizePrediction({ uid, jobId, predId }) {
                         uploadError: msg,
                         storagePath: null,
                         downloadURL: sourceUrl,
+                        originalPath: null,
+                        wmPath: null,
                         sourceUrl,
                         prompt: (pred?.input?.prompt) || '',
                         modelKey: (pred?.model || 'seedream4'),
                         createdAt: admin.firestore.FieldValue.serverTimestamp(),
                         updatedAt: new Date()
                     }, { merge: true });
-                    outputEntries.push({ storagePath: null, filename: fileName, contentType: null, bytes: 0, downloadURL: sourceUrl, sourceUrl, uploadError: msg });
+                    outputEntries.push({ storagePath: null, filename: fileName, contentType: null, bytes: 0, downloadURL: sourceUrl, sourceUrl, uploadError: msg, wmStoragePath: null, wmDownloadURL: null });
                     try {
                         await db.collection('userGallery').doc(uid).collection('images').doc(docId).set({
                             uid,

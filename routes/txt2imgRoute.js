@@ -193,7 +193,15 @@ router.post('/txt2img', requireAuth, async (req, res) => {
         } catch { return res.status(500).json({ ok: false, error: 'SERVICE_TEMPORARILY_UNAVAILABLE' }); }
 
         // Create job and enqueue prediction
-        const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages });
+        // Determine if user is on Free tier (enforce watermark)
+        let wm = false;
+        try {
+            const udoc = await db.collection('users').doc(uid).get();
+            const u = udoc.exists ? udoc.data() : {};
+            const tier = (u.subscription && typeof u.subscription === 'object' && u.subscription.tier) || u.plan || (u.isPro ? 'Pro' : 'Free');
+            wm = String(tier || '').toLowerCase() === 'free';
+        } catch (_) { wm = false; }
+        const job = await jobs.createJob({ userId: uid, modelKey, model, version, input: replicateInput, cost, pricePerImage, requestedImages, watermark: wm });
         try { logJSON('hold.create', { uid, jobId: job._id, pricePerImage, requestedImages, cost }); } catch { }
 
         // Create imageGenerations/{jobId} document with required fields (rules: uid must equal auth.uid)
@@ -294,11 +302,15 @@ router.get('/txt2img/:id', requireAuth, async (req, res) => {
     const j = await jobs.getJob(req.params.id);
     if (!j || j.userId !== req.uid) return res.status(404).json({ ok: false, error: 'not_found' });
     let out = Array.isArray(j.output) ? j.output : [];
-    // Normalize: ensure each item is an object with storagePath/filename/contentType/bytes
+    const isFree = Boolean(j.watermark);
+    // Normalize: ensure each item is an object with storagePath/filename/contentType/bytes.
+    // Prefer wmStoragePath for Free-tier jobs.
     out = out.map((it) => {
         if (typeof it === 'string') return { storagePath: it, filename: it.split('/').pop(), contentType: null, bytes: null };
         const o = it || {};
-        return { storagePath: o.storagePath || null, filename: o.filename || (o.storagePath ? String(o.storagePath).split('/').pop() : null), contentType: o.contentType || null, bytes: o.bytes || null };
+        const chosenPath = isFree && o.wmStoragePath ? o.wmStoragePath : (o.storagePath || null);
+        const fname = o.filename || (chosenPath ? String(chosenPath).split('/').pop() : (o.storagePath ? String(o.storagePath).split('/').pop() : null));
+        return { storagePath: chosenPath, filename: fname, contentType: o.contentType || null, bytes: o.bytes || null };
     });
     return res.json({ ok: true, job: { ...j, output: out } });
 });
@@ -306,6 +318,15 @@ router.get('/txt2img/:id', requireAuth, async (req, res) => {
 router.delete('/txt2img/:id', requireAuth, async (req, res) => {
     const j = await jobs.getJob(req.params.id);
     if (!j || j.userId !== req.uid) return res.status(404).json({ ok: false, error: 'not_found' });
+    // Prevent free tier users from deleting (upsell)
+    try {
+        const udoc = await db.collection('users').doc(req.uid).get();
+        const u = udoc.exists ? udoc.data() : {};
+        const tier = (u.subscription && typeof u.subscription === 'object' && u.subscription.tier) || u.plan || (u.isPro ? 'Pro' : 'Free');
+        if (String(tier || '').toLowerCase() === 'free') {
+            return res.status(403).json({ ok: false, error: 'NEED_SUBSCRIPTION', message: 'Upgrade to delete images' });
+        }
+    } catch (_) { }
     if (j.provider === 'replicate' && j.providerPredictionId) await rpl.cancelPrediction(j.providerPredictionId).catch(() => null);
     await jobs.updateJob(j._id, { status: 'canceled' });
     res.json({ ok: true });

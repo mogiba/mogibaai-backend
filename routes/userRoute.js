@@ -74,14 +74,110 @@ router.get('/profile', requireAuth, async (req, res) => {
       // ignore if helper fails
     }
 
+    // Build a subscription object for the client. Some users have top-level plan/subscriptionStatus
+    // instead of a nested `subscription` object; prefer nested but fall back to roots so UI shows correct plan.
+    let subscription = {};
+    if (user.subscription && typeof user.subscription === 'object') {
+      subscription = user.subscription;
+    } else {
+      // prefer root-level `plan` string, else infer from isPro
+      const tier = (typeof user.plan === 'string' && user.plan) ? user.plan : (user.isPro ? 'Pro' : 'Free');
+      const status = user.subscriptionStatus || user.subscription_status || user.subStatus || (tier === 'Free' ? 'inactive' : 'active');
+      // pick common renew/cancel fields if present
+      const renewsAt = user.renewsAt || user.current_period_end || user.renewalAt || null;
+      const cancelAt = user.cancelAt || user.cancel_at || null;
+      subscription = { tier, status, renewsAt, cancelAt };
+    }
+
+    // If the subscription appears to have expired (renewsAt in the past), enforce an authoritative
+    // downgrade in Firestore so the account is truly downgraded and credits are zeroed.
+    // We perform this in a transaction to be idempotent and avoid races.
+    try {
+      const now = Date.now();
+      // normalise renewsAt to a numeric timestamp where possible
+      let renewsAtTs = null;
+      if (subscription && subscription.renewsAt) {
+        const val = subscription.renewsAt;
+        // handle numeric timestamps, ISO strings or Firestore Timestamps-like objects
+        if (typeof val === 'number') renewsAtTs = Number(val);
+        else if (typeof val === 'string') {
+          const parsed = Date.parse(val);
+          if (!isNaN(parsed)) renewsAtTs = parsed;
+        } else if (val && typeof val.toDate === 'function') {
+          try { renewsAtTs = Number(val.toDate().getTime()); } catch (_) { /* ignore */ }
+        }
+      }
+
+      const shouldDowngrade = renewsAtTs !== null && !isNaN(renewsAtTs) && renewsAtTs <= now;
+      if (shouldDowngrade) {
+        const userRef = db.collection('users').doc(uid);
+        await db.runTransaction(async (t) => {
+          const snap = await t.get(userRef);
+          if (!snap.exists) return; // nothing to do
+          const data = snap.data() || {};
+          // re-evaluate current subscription state inside transaction
+          const curSub = (data.subscription && typeof data.subscription === 'object') ? data.subscription : {
+            tier: (typeof data.plan === 'string' && data.plan) ? data.plan : (data.isPro ? 'Pro' : 'Free'),
+            status: data.subscriptionStatus || data.subscription_status || data.subStatus || ((data.plan === 'Free' || !data.plan) ? 'inactive' : 'active'),
+            renewsAt: data.renewsAt || data.current_period_end || data.renewalAt || null,
+          };
+
+          // compute renewsAt inside transaction
+          let curRenewsTs = null;
+          if (curSub && curSub.renewsAt) {
+            const v = curSub.renewsAt;
+            if (typeof v === 'number') curRenewsTs = Number(v);
+            else if (typeof v === 'string') {
+              const p = Date.parse(v); if (!isNaN(p)) curRenewsTs = p;
+            } else if (v && typeof v.toDate === 'function') {
+              try { curRenewsTs = Number(v.toDate().getTime()); } catch (_) { /* ignore */ }
+            }
+          }
+
+          if (curRenewsTs === null || isNaN(curRenewsTs) || curRenewsTs > Date.now()) {
+            // subscription no longer expired according to the latest DB state
+            return;
+          }
+
+          // Prepare downgrade updates
+          const update = {};
+          update.plan = 'Free';
+          update.subscriptionStatus = 'inactive';
+          update.subscription = Object.assign({}, data.subscription || {}, { tier: 'Free', status: 'inactive' });
+          // zero legacy fields and canonical creditsBalance
+          update.credits_image = 0;
+          update.credits_video = 0;
+          update.creditsBalance = { credits_image: 0, credits_video: 0 };
+
+          t.set(userRef, update, { merge: true });
+        });
+
+        // reflect the authoritative change locally for the response
+        subscription = { tier: 'Free', status: 'inactive', renewsAt: subscription.renewsAt || null };
+        creditsBalance = { credits_image: 0, credits_video: 0 };
+        console.log(`Auto-downgraded expired subscription for uid=${uid}`);
+      }
+    } catch (downgradeErr) {
+      // Log but don't fail the profile response
+      console.warn('auto-downgrade failed for uid=', uid, downgradeErr && downgradeErr.message ? downgradeErr.message : downgradeErr);
+    }
+
+    // Ensure creditsBalance is an object for clients expecting credits_image / credits_video
+    let creditsBalance = {};
+    if (user.creditsBalance && typeof user.creditsBalance === 'object') creditsBalance = user.creditsBalance;
+    else creditsBalance = {
+      credits_image: Number(user.credits_image ?? user.imageCredits ?? user.image_credits ?? 0) || 0,
+      credits_video: Number(user.credits_video ?? user.videoCredits ?? user.video_credits ?? 0) || 0,
+    };
+
     const profile = {
       uid,
       nickname: user.nickname || '',
       email: user.email || '',
       avatarUrl: user.avatarUrl || req.decodedToken.picture || null,
       avatarUrlExpiresAt: user.avatarUrlExpiresAt || null,
-      subscription: user.subscription || { tier: 'Free' },
-      creditsBalance: user.creditsBalance || 0,
+      subscription,
+      creditsBalance,
       spentCredits,
       pendingDeletionCount: pendingCount,
     };
