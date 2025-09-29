@@ -239,7 +239,6 @@ const userRoute = require("./routes/userRoute");
 const adminRoute = require("./routes/adminRoute");
 const adminUsersRoute = require("./routes/adminUsersRoute");
 const adminPricingRoute = require("./routes/adminPricingRoute");
-const adminCreditsRoute = require('./routes/adminCreditsRoute');
 
 // Health
 app.get("/health", (req, res) =>
@@ -317,6 +316,14 @@ app.use('/api/images', imagesRoute);
 // Community admin actions
 const communityRoute = require('./routes/communityRoute');
 app.use('/api/community', communityRoute);
+// Studio routes (consistent character)
+try {
+  const studioRoutes = require('./routes/studioRoutes');
+  app.use('/api', studioRoutes);
+  console.log('Mounted /api studio routes');
+} catch (e) {
+  console.warn('Studio routes not mounted:', e && e.message);
+}
 
 // Debug echo endpoints (POST /api/debug/echo)
 const debugRoute = require("./routes/debugRoute");
@@ -330,7 +337,6 @@ app.use("/api/user", userRoute);
 app.use("/api/admin", adminRoute);
 app.use("/api/admin/users", adminUsersRoute);
 app.use("/api/admin", adminPricingRoute);
-app.use('/api/admin', adminCreditsRoute);
 
 // Start
 const PORT = process.env.PORT || 4000;

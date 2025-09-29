@@ -121,6 +121,10 @@ async function handleReplicateWebhook(req, res) {
                 const totalDebited = Math.max(0, billedImages * ppi);
                 await jobs.updateJob(job._id, { status: 'succeeded', output: storedOutputs, stored: storedAny, billedImages, totalDebited, webhookReceivedAt: new Date() });
                 if (totalDebited > 0) {
+                    // Legacy counter debit (idempotent) to keep users.credits_image in sync
+                    try { await jobs.ensureDebitOnce({ jobId: job._id, userId: job.userId, category: 'image', cost: totalDebited }); }
+                    catch (e) { console.warn('[webhook] ensureDebitOnce failed', e?.message); }
+                    // Unified ledger debit for new balances/history
                     await writeLedgerEntry({
                         uid: job.userId,
                         type: 'image',
@@ -135,11 +139,16 @@ async function handleReplicateWebhook(req, res) {
                 }
             } else {
                 await jobs.updateJob(job._id, { status: 'succeeded', output: storedOutputs, stored: storedAny, webhookReceivedAt: new Date() });
+                const flatCost = job.cost || 1;
+                if (flatCost > 0) {
+                    try { await jobs.ensureDebitOnce({ jobId: job._id, userId: job.userId, category: 'image', cost: flatCost }); }
+                    catch (e) { console.warn('[webhook] ensureDebitOnce (flat) failed', e?.message); }
+                }
                 await writeLedgerEntry({
                     uid: job.userId,
                     type: 'image',
                     direction: 'debit',
-                    amount: job.cost || 1,
+                    amount: flatCost,
                     source: job.model === 'img2img' ? 'image2image' : 'text2image',
                     reason: `${job.model || 'model'} generation`,
                     jobId: job._id,
