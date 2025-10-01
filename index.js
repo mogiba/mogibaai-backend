@@ -310,6 +310,12 @@ app.use('/api', img2imgRoute);
 // Txt2Img routes (text inputs)
 const txt2imgRoute = require('./routes/txt2imgRoute');
 app.use('/api', txt2imgRoute);
+// Kling video jobs
+try {
+  const klingVideoRoute = require('./routes/klingVideoRoute');
+  app.use('/api', klingVideoRoute);
+  console.log('Mounted /api/jobs/kling');
+} catch (e) { console.warn('Kling route not mounted:', e && e.message); }
 // Images route (delete etc.)
 const imagesRoute = require('./routes/imagesRoute');
 app.use('/api/images', imagesRoute);

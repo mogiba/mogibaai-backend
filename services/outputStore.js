@@ -65,13 +65,20 @@ async function storeReplicateOutput({
             return { ok: true, stored: false, sourceUrl, bytes, hash, reason: 'no_bucket' };
         }
 
-        const ext = ct.includes('png')
+        const ctL = (ct || '').toLowerCase();
+        const ext = ctL.includes('png')
             ? '.png'
-            : ct.includes('webp')
+            : ctL.includes('webp')
                 ? '.webp'
-                : ct.includes('jpeg') || ct.includes('jpg')
+                : (ctL.includes('jpeg') || ctL.includes('jpg'))
                     ? '.jpg'
-                    : '.bin';
+                    : (ctL.includes('mp4') || ctL.includes('mpeg4'))
+                        ? '.mp4'
+                        : (ctL.includes('webm'))
+                            ? '.webm'
+                            : (ctL.includes('quicktime') || ctL.includes('mov'))
+                                ? '.mov'
+                                : '.bin';
 
         const fileName = filename || `${jobId}_${index}${ext}`;
         const filePath = buildOwnerOutputPath(uid, jobId, fileName);

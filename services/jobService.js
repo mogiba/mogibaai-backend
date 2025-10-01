@@ -3,7 +3,7 @@ const credits = require('./creditsService');
 
 const NOW = () => admin.firestore.FieldValue.serverTimestamp();
 
-async function createJob({ userId, modelKey, model, version, input, cost, pricePerImage, requestedImages, watermark }) {
+async function createJob({ userId, modelKey, model, version, input, cost, pricePerImage, requestedImages, watermark, category = 'image' }) {
     const ref = db.collection('jobs').doc();
     const job = {
         _id: ref.id,
@@ -20,6 +20,7 @@ async function createJob({ userId, modelKey, model, version, input, cost, priceP
         pricePerImage: pricePerImage || null,
         requestedImages: requestedImages || null,
         watermark: Boolean(watermark) || false,
+        category: (category === 'video' ? 'video' : 'image'),
     };
     await ref.set(job);
     // Create a pending credits hold transaction
@@ -29,7 +30,7 @@ async function createJob({ userId, modelKey, model, version, input, cost, priceP
             kind: 'hold',
             jobId: ref.id,
             uid: userId,
-            category: 'image',
+            category: (category === 'video' ? 'video' : 'image'),
             amount: job.cost,
             status: 'pending',
             createdAt: NOW(),

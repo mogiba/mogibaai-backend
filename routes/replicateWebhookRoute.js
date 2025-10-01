@@ -64,6 +64,9 @@ async function handleReplicateWebhook(req, res) {
         const storedOutputs = [];
         let storedAny = false;
         const galleryDocs = [];
+        let firstSignedUrl = null;
+        let firstSourceUrl = null; // fallback when Storage is unavailable
+        const isVideoJob = (job.model === 'kling-video' || job.modelKey === 'kling-video');
         for (let i = 0; i < outs.length; i++) {
             const src = outs[i];
             const r = await storeReplicateOutput({ uid: job.userId, jobId: job._id, sourceUrl: src, index: i });
@@ -73,8 +76,9 @@ async function handleReplicateWebhook(req, res) {
                 // Signed URL for convenience (owner will also be able to call getDownloadURL client-side)
                 let signed = null;
                 try { signed = await getSignedUrlForPath(r.storagePath); } catch (_) { signed = null; }
+                if (!firstSignedUrl && signed && signed.url) firstSignedUrl = signed.url;
                 // Create/Upsert gallery doc under users/{uid}/images/{jobId}-{i}
-                const gid = `${job._id}-${i}`;
+                const gid = (isVideoJob && i === 0) ? `${job._id}` : `${job._id}-${i}`;
                 try {
                     // Flip placeholder to ready and fill URLs, preserving createdAt
                     const docRef = db.collection('users').doc(job.userId).collection('images').doc(gid);
@@ -82,7 +86,8 @@ async function handleReplicateWebhook(req, res) {
                         uid: job.userId,
                         jobId: job._id,
                         index: i,
-                        modelKey: job.modelKey || 'seedream4',
+                        modelKey: job.modelKey || job.model || 'seedream4',
+                        type: isVideoJob ? 'video' : 'image',
                         prompt: job?.input?.prompt || null,
                         aspectRatio: job?.input?.aspect_ratio || null,
                         size: job?.input?.size || null,
@@ -99,7 +104,7 @@ async function handleReplicateWebhook(req, res) {
                         uid: job.userId,
                         jobId: job._id,
                         storagePath: r.storagePath,
-                        modelKey: job.modelKey || 'seedream4',
+                        modelKey: job.modelKey || job.model || 'seedream4',
                         size: job?.input?.size || (job.pricePerImage === 48 ? '4K' : '2K'),
                         aspect_ratio: job?.input?.aspect_ratio || null,
                         prompt: job?.input?.prompt || '',
@@ -108,15 +113,35 @@ async function handleReplicateWebhook(req, res) {
                     });
                 } catch (e) { console.warn('[replicate.webhook] recordImageDoc failed', e && e.message); }
             } else {
-                // best-effort: keep a placeholder with source URL but no public URL
-                storedOutputs.push({ storagePath: null, filename: null, contentType: null, bytes: 0 });
+                // Best-effort: retain source URL so clients can still access the asset
+                if (!firstSourceUrl && src) firstSourceUrl = src;
+                storedOutputs.push({ storagePath: null, filename: null, contentType: null, bytes: 0, sourceUrl: src || null });
             }
         }
         const billedImages = Array.isArray(storedOutputs) ? storedOutputs.length : 0;
         const hasPerImage = Number.isFinite(Number(job.pricePerImage));
         try {
             const { writeLedgerEntry } = require('../services/creditsLedgerService');
-            if (hasPerImage) {
+            // Kling debits video credits flat using job.cost
+            if (isVideoJob) {
+                const debit = Number(job.cost || 0) || 0;
+                await jobs.updateJob(job._id, { status: 'succeeded', output: storedOutputs, stored: storedAny, billedImages, totalDebited: debit, webhookReceivedAt: new Date(), metrics: { ...(job.metrics || {}), predict_time: evt?.metrics?.predict_time || null }, downloadURL: firstSignedUrl || firstSourceUrl || null });
+                if (debit > 0) {
+                    try { await jobs.ensureDebitOnce({ jobId: job._id, userId: job.userId, category: 'video', cost: debit }); }
+                    catch (e) { console.warn('[webhook] ensureDebitOnce(video) failed', e?.message); }
+                    await writeLedgerEntry({
+                        uid: job.userId,
+                        type: 'video',
+                        direction: 'debit',
+                        amount: debit,
+                        source: 'image2video',
+                        reason: 'kling-video generation',
+                        jobId: job._id,
+                        meta: { modelKey: 'kling-video', duration: job?.input?.duration, mode: job?.input?.mode, predict_time: evt?.metrics?.predict_time || null },
+                        idempotencyKey: `debit:video:${job._id}`,
+                    }).catch(e => console.warn('[webhook] ledger debit (video) failed', e?.message));
+                }
+            } else if (hasPerImage) {
                 const ppi = Number(job.pricePerImage || 0);
                 const totalDebited = Math.max(0, billedImages * ppi);
                 await jobs.updateJob(job._id, { status: 'succeeded', output: storedOutputs, stored: storedAny, billedImages, totalDebited, webhookReceivedAt: new Date() });

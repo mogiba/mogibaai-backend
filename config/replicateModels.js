@@ -115,6 +115,22 @@ const MODELS = {
         allowedAspectRatios: ['match_input_image', '1:1', '4:3', '16:9', '9:16', '3:2', '2:3'],
         limits: { maxWidth: 4096, maxHeight: 4096, maxImages: 15 },
     },
+    // Video: Kling v2.1 (Replicate) – keep separate from image models
+    'kling-video': {
+        // Use owner/name format for slug so helpers can resolve latest if needed
+        slug: 'kwaivgi/kling-v2.1',
+        owner: 'kwaivgi',
+        name: 'kling-v2.1',
+        // Version: leave blank to auto-resolve latest at runtime via Replicate API
+        // You can pin this to a specific version ID once known (e.g., '1234abcd...')
+        version: '',
+        category: 'video',
+        type: 'video',
+        // Baseline cost hint (actual hold computed per mode/duration)
+        cost: 60,
+        enabled: true,
+        label: 'Kling v2.1',
+    },
 };
 
 // Feature flag: enabled only if explicitly allowed AND required secrets exist
