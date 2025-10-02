@@ -39,6 +39,19 @@ router.get('/', async (req, res) => {
                     k4: Number(pub.models?.seedream4?.txt2img?.size4K || 0) || 0,
                 },
             },
+            'kling-video': {
+                enabled: pub.models?.['kling-video']?.enabled !== false,
+                video: {
+                    '720p': {
+                        s5: Number(pub.models?.['kling-video']?.video?.['720p']?.s5 || 0) || 0,
+                        s10: Number(pub.models?.['kling-video']?.video?.['720p']?.s10 || 0) || 0,
+                    },
+                    '1080p': {
+                        s5: Number(pub.models?.['kling-video']?.video?.['1080p']?.s5 || 0) || 0,
+                        s10: Number(pub.models?.['kling-video']?.video?.['1080p']?.s10 || 0) || 0,
+                    },
+                },
+            },
         };
         const out = { ok: true, version, models, plans: {}, coupons: {} };
         const noCache = (String(req.query.noCache || '') === '1') || (typeof req.query.ts !== 'undefined');

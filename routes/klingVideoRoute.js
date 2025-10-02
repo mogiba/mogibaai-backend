@@ -1,12 +1,14 @@
 const express = require('express');
 const requireAuth = require('../middlewares/requireAuth');
 const { MODELS, getModel } = require('../config/replicateModels');
-const { db, admin, getSignedUrlForPath } = require('../utils/firebaseUtils');
+const { db, admin, getSignedUrlForPath, getPublicDownloadUrlForPath } = require('../utils/firebaseUtils');
 const { uploadInputBufferToFirebase } = require('../services/outputStore');
 const rpl = require('../services/replicateService');
 const { resolveLatestVersion } = require('../services/replicateService');
 const jobs = require('../services/jobService');
 const credits = require('../services/creditsService');
+let pricingService = null;
+try { pricingService = require('../services/pricingService'); } catch (_) { pricingService = null; }
 
 const router = express.Router();
 
@@ -22,8 +24,8 @@ function rateLimit(uid) {
     return rec.count > RATE.max;
 }
 
-// POST /api/jobs/kling
-router.post('/jobs/kling', requireAuth, async (req, res) => {
+// Internal handler to avoid duplicating logic
+async function handleKlingJobCreate(req, res) {
     try {
         if (rateLimit(req.uid)) return res.status(429).json({ ok: false, error: 'RATE_LIMITED' });
 
@@ -48,7 +50,16 @@ router.post('/jobs/kling', requireAuth, async (req, res) => {
                 const origin = base || `http://localhost:${process.env.PORT || 4000}`;
                 return `${origin}${urlOrPath}`;
             }
-            try { const s = await getSignedUrlForPath(urlOrPath, { ttlMs: 60 * 60 * 1000 }); return s?.url || null; } catch { return null; }
+            // Prefer token-based public URL compatible with external fetchers
+            try {
+                const pub = await getPublicDownloadUrlForPath(urlOrPath, { ensureToken: true, cacheControl: 'public,max-age=3600' });
+                if (pub && pub.url) return pub.url;
+            } catch (_) { }
+            // Fallback to signed URL if token route fails
+            try {
+                const s = await getSignedUrlForPath(urlOrPath, { ttlMs: 60 * 60 * 1000 });
+                return s?.url || null;
+            } catch { return null; }
         }
 
         startUrl = await toSigned(startUrl);
@@ -69,14 +80,19 @@ router.post('/jobs/kling', requireAuth, async (req, res) => {
         }
         if (!versionId) return res.status(503).json({ ok: false, error: 'VERSION_UNAVAILABLE', message: 'Kling model version not available' });
 
-        // Pricing: credits based on mode + duration
-        // Example mapping provided: 720p 5s = 60, 1080p 10s = 120
+        // Pricing: credits based on mode + duration via pricingService (fallback heuristic)
         const isHD = String(mode).toLowerCase() === 'hd' || String(mode).toLowerCase() === 'pro';
         const dur = Math.min(10, Math.max(5, Number(duration) || 5));
-        let hold = 60; // default 5s 720p
-        if (isHD && dur >= 10) hold = 120;
-        else if (isHD && dur <= 5) hold = 90; // mid-tier example if needed
-        else if (!isHD && dur >= 10) hold = 90; // 720p 10s
+        let hold = 60; // default
+        try {
+            if (pricingService && typeof pricingService.getVideoPrice === 'function') {
+                hold = await pricingService.getVideoPrice({ modelKey: 'kling-video', options: { resolution: isHD ? '1080p' : '720p', duration: dur } });
+            } else {
+                if (isHD && dur >= 10) hold = 120; else if (isHD && dur <= 5) hold = 90; else if (!isHD && dur >= 10) hold = 90; else hold = 60;
+            }
+        } catch (_) {
+            if (isHD && dur >= 10) hold = 120; else if (isHD && dur <= 5) hold = 90; else if (!isHD && dur >= 10) hold = 90; else hold = 60;
+        }
 
         // Check video credits
         try {
@@ -125,7 +141,12 @@ router.post('/jobs/kling', requireAuth, async (req, res) => {
         console.error('[kling] create error', e?.message);
         return res.status(500).json({ ok: false, error: 'INTERNAL', message: e?.message });
     }
-});
+}
+
+// POST /api/jobs/kling
+router.post('/jobs/kling', requireAuth, handleKlingJobCreate);
+// Alias: POST /api/video/kling
+router.post('/video/kling', requireAuth, handleKlingJobCreate);
 
 // GET /api/jobs/:id – poll job status
 router.get('/jobs/:id', requireAuth, async (req, res) => {

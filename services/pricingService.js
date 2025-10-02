@@ -15,6 +15,10 @@ const DEFAULTS = Object.freeze({
         'nano-banana': { txt2img: { default: 20, standard: 20, hd: 40 }, i2i: 30, img2img: { default: 30 }, enabled: true },
         // SeeDream-4: keep 2K/4K defaults
         seedream4: { txt2img: { size2K: 24, size4K: 48 }, enabled: true },
+        // Kling video defaults (credits for 5s and 10s durations)
+        // Schema suggested:
+        // models: { 'kling-video': { video: { '720p': { s5: 60, s10: 90 }, '1080p': { s5: 90, s10: 120 } }, enabled: true } }
+        'kling-video': { video: { '720p': { s5: 60, s10: 90 }, '1080p': { s5: 90, s10: 120 } }, enabled: true },
     },
 });
 
@@ -103,6 +107,28 @@ async function getImg2ImgPrice({ modelKey, options = {} } = {}) {
     return coerceInt(cfg.img2img?.defaultPerImage, DEFAULTS.img2img.defaultPerImage);
 }
 
+// Compute price for video models (e.g., Kling) based on resolution and duration
+// options: { resolution: '720p'|'1080p' (or 'standard'|'hd'), duration: 5|10 }
+async function getVideoPrice({ modelKey, options = {} } = {}) {
+    const cfg = await loadConfig();
+    const m = (modelKey && cfg.models[modelKey]) ? cfg.models[modelKey] : null;
+    const res = String(options.resolution || options.mode || '').toLowerCase();
+    const isHd = res === '1080p' || res === 'hd' || res === 'pro';
+    const keyRes = isHd ? '1080p' : '720p';
+    const dur = Math.min(10, Math.max(5, parseInt(options.duration || 5, 10)));
+    const bucket = dur >= 10 ? 's10' : 's5';
+    // Prefer explicit config if present
+    const conf = m && m.video ? m.video : DEFAULTS.models['kling-video'].video;
+    const chosen = conf?.[keyRes]?.[bucket];
+    const v = Number(chosen);
+    if (Number.isFinite(v) && v > 0) return v;
+    // Fallback heuristic
+    if (isHd && dur >= 10) return 120;
+    if (isHd && dur <= 5) return 90;
+    if (!isHd && dur >= 10) return 90;
+    return 60;
+}
+
 // Public surface for UI
 async function getPublicPricing() {
     const cfg = await loadConfig();
@@ -137,6 +163,19 @@ async function getPublicPricing() {
                     size4K: coerceInt(cfg.models?.seedream4?.i2i?.size4K, 40),
                 },
                 enabled: cfg.models?.seedream4?.enabled !== false,
+            },
+            'kling-video': {
+                video: {
+                    '720p': {
+                        s5: coerceInt(cfg.models?.['kling-video']?.video?.['720p']?.s5, DEFAULTS.models['kling-video'].video['720p'].s5),
+                        s10: coerceInt(cfg.models?.['kling-video']?.video?.['720p']?.s10, DEFAULTS.models['kling-video'].video['720p'].s10),
+                    },
+                    '1080p': {
+                        s5: coerceInt(cfg.models?.['kling-video']?.video?.['1080p']?.s5, DEFAULTS.models['kling-video'].video['1080p'].s5),
+                        s10: coerceInt(cfg.models?.['kling-video']?.video?.['1080p']?.s10, DEFAULTS.models['kling-video'].video['1080p'].s10),
+                    },
+                },
+                enabled: cfg.models?.['kling-video']?.enabled !== false,
             },
         },
         updatedAt: cfg.updatedAt || null,
@@ -209,6 +248,7 @@ module.exports = {
     cacheInfo,
     getTxt2ImgPrice,
     getImg2ImgPrice,
+    getVideoPrice,
     getPublicPricing,
     updatePricingModels,
     listCouponsPublic,

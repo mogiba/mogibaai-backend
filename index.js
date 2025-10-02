@@ -301,12 +301,24 @@ app.use("/api/pricing", pricingRoute);
 // Replicate routes (non-webhook endpoints) can mount after JSON
 const replicateWebhookRoute = require('./routes/replicateWebhookRoute');
 app.use('/api/replicate', replicateWebhookRoute);
+// New img2vid webhook (Files API based)
+try {
+  const replicateImg2VidWebhook = require('./routes/replicateImg2VidWebhook');
+  app.use('/api', replicateImg2VidWebhook);
+  console.log('Mounted /api/replicate/webhook/img2vid');
+} catch (e) { console.warn('Img2Vid webhook not mounted:', e && e.message); }
 // New billing endpoints (minimal wrapper over payments/razorpay flows)
 const billingRoute = require("./routes/billingRoute");
 app.use("/api/billing", billingRoute);
 // Img2Img routes (multipart + json) under /api
 const img2imgRoute = require('./routes/img2imgRoute');
 app.use('/api', img2imgRoute);
+// Img2Vid routes (Files API based)
+try {
+  const img2vidRoute = require('./routes/img2vidRoute');
+  app.use('/api', img2vidRoute);
+  console.log('Mounted /api/img2vid/jobs');
+} catch (e) { console.warn('Img2Vid route not mounted:', e && e.message); }
 // Txt2Img routes (text inputs)
 const txt2imgRoute = require('./routes/txt2imgRoute');
 app.use('/api', txt2imgRoute);

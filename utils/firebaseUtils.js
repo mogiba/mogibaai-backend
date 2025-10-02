@@ -236,3 +236,30 @@ async function recordImageDoc({ uid, jobId, storagePath, modelKey, size, aspect_
 
 module.exports.saveBufferToStorage = saveBufferToStorage;
 module.exports.recordImageDoc = recordImageDoc;
+
+/* ---------- Public download URL helper (token-based) ---------- */
+async function getPublicDownloadUrlForPath(storagePath, { ensureToken = true, cacheControl = 'public,max-age=3600' } = {}) {
+  if (!storagePath) throw new Error('storagePath required');
+  if (!bucket) throw new Error('Storage bucket not configured');
+  const file = bucket.file(storagePath);
+  const [exists] = await file.exists();
+  if (!exists) throw new Error('object_not_found');
+  let [meta] = await file.getMetadata();
+  let token = meta?.metadata?.firebaseStorageDownloadTokens || meta?.metadata?.downloadTokens || '';
+  if (ensureToken && !token) {
+    token = uuidv4();
+    const newMeta = { metadata: { ...(meta.metadata || {}), firebaseStorageDownloadTokens: token } };
+    if (cacheControl) newMeta.cacheControl = cacheControl;
+    await file.setMetadata(newMeta);
+  }
+  if (!token) {
+    // Cannot build a v0 URL without token; fallback to signed URL via caller if needed
+    return null;
+  }
+  const bucketName = bucket.name;
+  const object = encodeURIComponent(storagePath);
+  const url = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${object}?alt=media&token=${encodeURIComponent(token)}`;
+  return { url, token };
+}
+
+module.exports.getPublicDownloadUrlForPath = getPublicDownloadUrlForPath;
