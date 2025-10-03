@@ -1,7 +1,7 @@
 const express = require('express');
 const requireAuth = require('../middlewares/requireAuth');
 const { MODELS, getModel } = require('../config/replicateModels');
-const { db, admin, getSignedUrlForPath, getPublicDownloadUrlForPath } = require('../utils/firebaseUtils');
+const { db, admin, getSignedUrlForPath, getPublicDownloadUrlForPath, bucket } = require('../utils/firebaseUtils');
 const { uploadInputBufferToFirebase } = require('../services/outputStore');
 const rpl = require('../services/replicateService');
 const { resolveLatestVersion } = require('../services/replicateService');
@@ -41,9 +41,59 @@ async function handleKlingJobCreate(req, res) {
         // Users might upload base64 or file via data URL in future; for now expect storage paths or https URLs
 
         // If storage paths provided (firebase paths), convert to signed URLs for Replicate
+        function parseStoragePathFromUrl(u) {
+            try {
+                const url = new URL(u);
+                const host = (url.hostname || '').toLowerCase();
+                // storage.googleapis.com/<bucket>/<path>
+                if (host === 'storage.googleapis.com' && url.pathname) {
+                    const parts = url.pathname.replace(/^\/+/, '').split('/');
+                    if (parts.length >= 2) {
+                        const p = parts.slice(1).join('/');
+                        return decodeURIComponent(p);
+                    }
+                }
+                // firebasestorage.googleapis.com/v0/b/<bucket>/o/<object>
+                if (host === 'firebasestorage.googleapis.com') {
+                    const segs = url.pathname.split('/').filter(Boolean);
+                    const oIdx = segs.findIndex((s) => s === 'o');
+                    if (oIdx !== -1 && segs[oIdx + 1]) {
+                        return decodeURIComponent(segs[oIdx + 1]);
+                    }
+                }
+            } catch (_) { }
+            return null;
+        }
+
+        async function waitForExists(storagePath, { timeoutMs = 60_000, intervalMs = 1000 } = {}) {
+            if (!storagePath || !bucket) return false;
+            const start = Date.now();
+            while (Date.now() - start < timeoutMs) {
+                try {
+                    const [exists] = await bucket.file(storagePath).exists();
+                    if (exists) return true;
+                } catch (_) { /* ignore transient errors */ }
+                await new Promise((r) => setTimeout(r, intervalMs));
+            }
+            return false;
+        }
+
         async function toSigned(urlOrPath) {
             if (!urlOrPath) return null;
-            if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
+            if (/^https?:\/\//i.test(urlOrPath)) {
+                // If this is a Firebase Storage URL to our bucket, ensure the object exists before using it.
+                const p = parseStoragePathFromUrl(urlOrPath);
+                if (p) {
+                    const ok = await waitForExists(p, { timeoutMs: 60_000, intervalMs: 1000 });
+                    if (!ok) {
+                        // Let caller decide; respond with a retriable error rather than enqueueing a doomed job.
+                        const err = new Error('START_IMAGE_NOT_READY');
+                        err.status = 409;
+                        throw err;
+                    }
+                }
+                return urlOrPath;
+            }
             // Support local tmp uploads served by express at /tmp-uploads
             if (urlOrPath.startsWith('/tmp-uploads/')) {
                 const base = (process.env.PUBLIC_API_BASE || '').replace(/\/$/, '');
@@ -52,6 +102,13 @@ async function handleKlingJobCreate(req, res) {
             }
             // Prefer token-based public URL compatible with external fetchers
             try {
+                // Ensure object exists first; for freshly created paths, writes may lag.
+                const ok = await waitForExists(urlOrPath, { timeoutMs: 60_000, intervalMs: 1000 });
+                if (!ok) {
+                    const err = new Error('START_IMAGE_NOT_READY');
+                    err.status = 409;
+                    throw err;
+                }
                 const pub = await getPublicDownloadUrlForPath(urlOrPath, { ensureToken: true, cacheControl: 'public,max-age=3600' });
                 if (pub && pub.url) return pub.url;
             } catch (_) { }
@@ -62,8 +119,9 @@ async function handleKlingJobCreate(req, res) {
             } catch { return null; }
         }
 
-        startUrl = await toSigned(startUrl);
-        endUrl = await toSigned(endUrl);
+        // Resolve/verify URLs; if not ready, return a retriable 409
+        try { startUrl = await toSigned(startUrl); } catch (e) { if (e && e.status === 409) return res.status(409).json({ ok: false, error: 'START_IMAGE_NOT_READY' }); throw e; }
+        try { endUrl = await toSigned(endUrl); } catch (e) { if (e && e.status === 409) endUrl = null; else throw e; }
 
         // Model config (hardcoded entry)
         const modelKey = 'kling-video';
