@@ -168,9 +168,26 @@ router.delete('/:id', requireAuth, async (req, res) => {
         if (userSnap.exists) {
             const d = userSnap.data() || {};
             const storagePath = d.storagePath || null;
-            const jobId = String(id).split('-')[0];
+            const jobId = d.jobId || String(id).split('-')[0];
             if (storagePath) { try { await deleteObject(storagePath); } catch (_) { /* ignore */ } }
             await userDocRef.delete();
+            // Remove any duplicate docs in user's gallery that point to the same storagePath
+            try {
+                if (storagePath) {
+                    const dupQ = await db
+                        .collection('users')
+                        .doc(req.uid)
+                        .collection('images')
+                        .where('storagePath', '==', storagePath)
+                        .limit(50)
+                        .get();
+                    if (!dupQ.empty) {
+                        const batch = db.batch();
+                        dupQ.forEach((doc) => batch.delete(doc.ref));
+                        await batch.commit();
+                    }
+                }
+            } catch (_) { /* best-effort */ }
             // Best-effort: remove matching global images doc by storagePath
             try {
                 if (storagePath) {
@@ -180,14 +197,46 @@ router.delete('/:id', requireAuth, async (req, res) => {
                     if (!gq.empty) await batch.commit();
                 }
                 // Also try to remove generation doc so gallery base list shrinks
-                if (jobId) {
-                    const genRef = db.collection('imageGenerations').doc(jobId);
-                    const genSnap = await genRef.get();
-                    if (genSnap.exists) {
+                await (async () => {
+                    const removeFromGenDoc = async (docRef) => {
+                        const genSnap = await docRef.get();
+                        if (!genSnap.exists) return false;
                         const gd = genSnap.data() || {};
-                        if (gd.uid === req.uid) await genRef.delete();
+                        if (gd.uid && gd.uid !== req.uid) return false;
+                        const out = Array.isArray(gd.output) ? gd.output : [];
+                        let changed = false;
+                        const filtered = out.filter((it) => {
+                            if (!it) return false;
+                            if (typeof it === 'string') { if (storagePath && it === storagePath) { changed = true; return false; } return true; }
+                            if (typeof it === 'object') { if (storagePath && (it.storagePath === storagePath)) { changed = true; return false; } return true; }
+                            return true;
+                        });
+                        if (changed) {
+                            if (filtered.length === 0) { await docRef.delete(); }
+                            else { await docRef.update({ output: filtered }); }
+                            return true;
+                        }
+                        return false;
+                    };
+                    // Prefer jobId path if available
+                    if (jobId) {
+                        const genRef = db.collection('imageGenerations').doc(jobId);
+                        const removed = await removeFromGenDoc(genRef);
+                        if (removed) return;
                     }
-                }
+                    // Fallback: scan recent docs for this user and remove matching storagePath
+                    const q = await db.collection('imageGenerations')
+                        .where('uid', '==', req.uid)
+                        .orderBy('createdAt', 'desc')
+                        .limit(200)
+                        .get()
+                        .catch(async () => await db.collection('imageGenerations').where('uid', '==', req.uid).limit(200).get());
+                    for (const doc of q.docs) {
+                        const removed = await removeFromGenDoc(doc.ref);
+                        if (removed) break;
+                    }
+                })();
+
             } catch (_) { }
             return res.json({ ok: true });
         }
@@ -201,6 +250,23 @@ router.delete('/:id', requireAuth, async (req, res) => {
         const storagePath = data.storagePath;
         if (storagePath) { try { await deleteObject(storagePath); } catch (_) { /* ignore */ } }
         await ref.delete();
+        // Also best-effort remove any user gallery docs pointing to this storagePath
+        try {
+            if (data && data.storagePath) {
+                const dupQ = await db
+                    .collection('users')
+                    .doc(req.uid)
+                    .collection('images')
+                    .where('storagePath', '==', data.storagePath)
+                    .limit(50)
+                    .get();
+                if (!dupQ.empty) {
+                    const batch = db.batch();
+                    dupQ.forEach((doc) => batch.delete(doc.ref));
+                    await batch.commit();
+                }
+            }
+        } catch (_) { }
         return res.json({ ok: true });
     } catch (e) {
         return res.status(500).json({ ok: false, error: 'DELETE_FAILED', message: e?.message });

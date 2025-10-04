@@ -9,18 +9,20 @@ const router = express.Router();
 
 router.post('/replicate/webhook/img2vid', express.raw({ type: 'application/json' }), async (req, res) => {
     try {
+        const reqId = Math.random().toString(36).slice(2, 8);
         const jobId = String(req.query.jobId || '').trim();
-        if (!jobId) { res.status(400).send('jobId required'); return; }
+        if (!jobId) { console.warn(`[img2vid.webhook:${reqId}] missing jobId`); res.status(400).send('jobId required'); return; }
         let evt = null; try { evt = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (typeof req.body === 'string' ? req.body : JSON.stringify(req.body))); } catch { evt = null; }
         const status = String(evt?.status || '').toLowerCase();
         const outputs = Array.isArray(evt?.output) ? evt.output : (evt?.output ? [evt.output] : []);
         const predId = evt?.id || null;
+        console.log(`[img2vid.webhook:${reqId}] received`, { jobId, predId, status, outputs: outputs.length });
 
         // Load job and verify prediction id if present
         const job = await getVideoJob(jobId);
-        if (!job) { res.status(200).send('ok'); return; }
+        if (!job) { console.warn(`[img2vid.webhook:${reqId}] job not found`, { jobId, predId }); res.status(200).send('ok'); return; }
         if (predId && job.providerPredictionId && predId !== job.providerPredictionId) {
-            console.warn('[img2vid.webhook] prediction id mismatch', { jobId, predId, stored: job.providerPredictionId });
+            console.warn(`[img2vid.webhook:${reqId}] prediction id mismatch`, { jobId, predId, stored: job.providerPredictionId });
         }
 
         if (status === 'succeeded') {
@@ -39,6 +41,7 @@ router.post('/replicate/webhook/img2vid', express.raw({ type: 'application/json'
                 }
             }
             await markSuccess(jobId, stored, { webhookReceivedAt: admin.firestore.FieldValue.serverTimestamp(), providerPredictionId: predId, metrics: evt?.metrics || null });
+            console.log(`[img2vid.webhook:${reqId}] stored outputs`, { jobId, count: stored.length });
 
             // Debit credits once (video)
             try {
@@ -51,7 +54,7 @@ router.post('/replicate/webhook/img2vid', express.raw({ type: 'application/json'
                         await credits.spendCredit(job.uid, 'video', debit);
                     }
                 }
-            } catch (e) { console.warn('[img2vid.webhook] debit failed', e?.message); }
+            } catch (e) { console.warn(`[img2vid.webhook:${reqId}] debit failed`, e?.message); }
 
             // Flip placeholder gallery doc to ready
             try {
@@ -72,7 +75,7 @@ router.post('/replicate/webhook/img2vid', express.raw({ type: 'application/json'
                     await batch.commit();
                     console.log('[img2vid.webhook] scheduled input cleanup', { jobId, count: toCleanup.length });
                 }
-            } catch (e) { console.warn('[img2vid.webhook] schedule cleanup failed', e && e.message); }
+            } catch (e) { console.warn(`[img2vid.webhook:${reqId}] schedule cleanup failed`, e && e.message); }
 
             res.status(200).send('ok');
             return;
@@ -80,6 +83,7 @@ router.post('/replicate/webhook/img2vid', express.raw({ type: 'application/json'
         if (status === 'failed' || status === 'canceled') {
             await markFailed(jobId, evt?.error || status, { webhookReceivedAt: admin.firestore.FieldValue.serverTimestamp(), providerPredictionId: predId });
             try { await db.collection('users').doc(job.uid).collection('images').doc(jobId).set({ status, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }); } catch { }
+            console.warn(`[img2vid.webhook:${reqId}] job marked ${status}`, { jobId, error: evt?.error || null });
             res.status(200).send('ok');
             return;
         }
