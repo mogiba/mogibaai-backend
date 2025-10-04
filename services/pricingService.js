@@ -184,11 +184,16 @@ async function getPublicPricing() {
 
 // Admin writes
 async function updatePricingModels({ models, img2img, actor } = {}) {
-    const patch = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    const ref = db.collection('config').doc('pricing');
+    // Atomically increment version so clients (usePricing) can detect change
+    const patch = {
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        version: admin.firestore.FieldValue.increment(1),
+    };
     if (models && typeof models === 'object') patch.models = models;
     if (img2img && typeof img2img === 'object') patch.img2img = img2img;
     if (actor) patch.updatedBy = actor;
-    await db.collection('config').doc('pricing').set(patch, { merge: true });
+    await ref.set(patch, { merge: true });
     __cache = { at: 0, data: null }; // bust cache
     return loadConfig(true);
 }

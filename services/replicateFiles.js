@@ -36,7 +36,7 @@ async function uploadFileToReplicate({ readable, filename, contentType }) {
     return resp.data;
 }
 
-async function createKlingPrediction({ fileId, endFileId = null, mode = 'standard', prompt = '', negativePrompt = '', duration = 5, webhookUrl, webhookSecret }) {
+async function createKlingPrediction({ fileId, endFileId = null, mode = 'standard', prompt = '', negativePrompt = '', duration = 5, webhookUrl, webhookSecret, resolution }) {
     if (!fileId) throw new Error('fileId required');
     const agent = getReplicateAgent();
     // Resolve latest Kling v2.1 version id
@@ -54,6 +54,10 @@ async function createKlingPrediction({ fileId, endFileId = null, mode = 'standar
         webhook: webhookUrl,
         webhook_events_filter: ['completed', 'canceled'],
     };
+    if (resolution) {
+        // Some Kling variants treat resolution implicitly via mode; keep for potential future explicit param
+        body.input.resolution = String(resolution);
+    }
     if (endFileId) {
         body.input.end_image = `replicate://${endFileId}`;
     }

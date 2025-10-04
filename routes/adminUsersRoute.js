@@ -171,6 +171,7 @@ router.delete('/:id', requireAdmin, async (req, res) => {
     } catch (e) { return res.status(500).json({ ok: false, error: 'DELETE_FAILED' }); }
 });
 
+// Legacy admin credits adjustment (now routed through unified ledger). Kept path stable for UI.
 router.post('/:id/credits', requireAdmin, express.json(), async (req, res) => {
     try {
         const id = req.params.id; const { type, category, amount, note } = req.body || {};
@@ -178,30 +179,42 @@ router.post('/:id/credits', requireAdmin, express.json(), async (req, res) => {
         if (!['image', 'video'].includes(category) || !['add', 'remove'].includes(type) || !Number.isFinite(delta) || delta <= 0) {
             return res.status(422).json({ ok: false, error: 'INVALID_INPUT' });
         }
-        const change = type === 'add' ? delta : -delta;
-        const ref = db.collection('users').doc(id);
-        let afterImage = 0, afterVideo = 0;
-        await db.runTransaction(async (tx) => {
-            const doc = await tx.get(ref);
-            const d = doc.data() || {};
-            const curImage = Number(d.imageCredits || d.credits?.image || d.credits_image || d.creditsBalance?.credits_image || 0) || 0;
-            const curVideo = Number(d.videoCredits || d.credits?.video || d.credits_video || d.creditsBalance?.credits_video || 0) || 0;
-            afterImage = curImage;
-            afterVideo = curVideo;
-            if (category === 'image') afterImage = curImage + change; else afterVideo = curVideo + change;
-            const patch = { credits: { ...(d.credits || {}) } };
-            patch.credits.image = afterImage;
-            patch.credits.video = afterVideo;
-            patch.imageCredits = afterImage;
-            patch.videoCredits = afterVideo;
-            patch.credits_image = afterImage;
-            patch.credits_video = afterVideo;
-            patch.creditsBalance = { credits_image: afterImage, credits_video: afterVideo };
-            tx.set(ref, patch, { merge: true });
-        });
-        await db.collection('creditsTransactions').add({ userId: id, adminId: req.adminUid, category, delta: change, balanceAfter: category === 'image' ? afterImage : afterVideo, note: note || null, time: new Date() });
-        return res.json({ ok: true, balances: { image: afterImage, video: afterVideo } });
-    } catch (e) { return res.status(500).json({ ok: false, error: 'CREDITS_FAILED' }); }
+        const direction = type === 'add' ? 'credit' : 'debit';
+        const { writeLedgerEntry, getUserBalances } = require('../services/creditsLedgerService');
+        // Write ledger entry transactionally (will block negative debit)
+        let entry;
+        try {
+            entry = await writeLedgerEntry({
+                uid: id,
+                type: category,
+                direction,
+                amount: delta,
+                source: 'admin_adjustment',
+                reason: note || 'admin adjustment',
+                createdBy: `admin:${req.adminUid}`,
+                idempotencyKey: `adminUsersRoute:${req.adminUid}:${id}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+            });
+            console.log('[adminUsersRoute] ledger entry created', { user: id, entryId: entry.id, type: category, direction, amount: delta, balance_after: entry.balance_after });
+        } catch (err) {
+            const code = err?.code === 'NEGATIVE_BALANCE_BLOCKED' ? 400 : 500;
+            console.warn('[adminUsersRoute] ledger entry failed', { user: id, error: err?.message, code: err?.code });
+            return res.status(code).json({ ok: false, error: err?.code || 'LEDGER_WRITE_FAILED', message: err?.message });
+        }
+        // Mirror balances back into users doc legacy fields for existing UI pieces
+        let balances = await getUserBalances(id).catch(() => ({ image: 0, video: 0 }));
+        try {
+            await db.collection('users').doc(id).set({
+                imageCredits: balances.image,
+                videoCredits: balances.video,
+                credits_image: balances.image,
+                credits_video: balances.video,
+                creditsBalance: { credits_image: balances.image, credits_video: balances.video },
+                credits: { image: balances.image, video: balances.video },
+                creditsSyncedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+        } catch { /* best effort */ }
+        return res.json({ ok: true, entry, balances });
+    } catch (e) { return res.status(500).json({ ok: false, error: 'CREDITS_FAILED', message: e?.message }); }
 });
 
 router.put('/:id/subscription', requireAdmin, express.json(), async (req, res) => {

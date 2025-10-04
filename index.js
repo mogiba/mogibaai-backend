@@ -239,6 +239,13 @@ const userRoute = require("./routes/userRoute");
 const adminRoute = require("./routes/adminRoute");
 const adminUsersRoute = require("./routes/adminUsersRoute");
 const adminPricingRoute = require("./routes/adminPricingRoute");
+// Admin credits (ledger + adjustments)
+let adminCreditsRoute = null;
+try {
+  adminCreditsRoute = require('./routes/adminCreditsRoute');
+} catch (e) {
+  console.warn('Admin credits route failed to load', e && e.message);
+}
 
 // Health
 app.get("/health", (req, res) =>
@@ -355,6 +362,10 @@ app.use("/api/user", userRoute);
 app.use("/api/admin", adminRoute);
 app.use("/api/admin/users", adminUsersRoute);
 app.use("/api/admin", adminPricingRoute);
+if (adminCreditsRoute) {
+  app.use('/api/admin', adminCreditsRoute);
+  console.log('Mounted /api/admin/credits routes');
+}
 
 // Start
 const PORT = process.env.PORT || 4000;

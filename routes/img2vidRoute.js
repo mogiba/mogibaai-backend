@@ -23,14 +23,21 @@ async function waitForFileExists(file, { tries = 10, delayMs = 800 } = {}) {
 }
 
 // Helper: resolve hold credits using pricingService or fallback
-async function resolveHold({ mode, duration }) {
-    const isHD = String(mode).toLowerCase() === 'hd' || String(mode).toLowerCase() === 'pro';
+async function resolveHold({ mode, duration, resolution }) {
+    // Normalize mode (legacy 'hd' -> 'pro')
+    const raw = String(mode || '').toLowerCase();
+    const normMode = raw === 'hd' ? 'pro' : (raw === 'pro' ? 'pro' : 'standard');
     const dur = Math.min(10, Math.max(5, Number(duration) || 5));
+    const res = String(resolution || '').toLowerCase();
+    // Prefer explicit resolution if passed, else infer from mode
+    let resKey = (res === '1080p' || res === '1080p_vertical') ? '1080p' : '720p';
     if (pricingService && typeof pricingService.getVideoPrice === 'function') {
-        return await pricingService.getVideoPrice({ modelKey: 'kling-video', options: { resolution: isHD ? '1080p' : '720p', duration: dur } });
+        return await pricingService.getVideoPrice({ modelKey: 'kling-video', options: { resolution: resKey, duration: dur, mode: normMode } });
     }
-    // fallback
-    if (isHD && dur >= 10) return 120; if (isHD && dur <= 5) return 90; if (!isHD && dur >= 10) return 90; return 60;
+    // Fallback pricing (example: standard 720p: 49(5s)/98(10s); pro 1080p: 79(5s)/158(10s))
+    const isPro = normMode === 'pro';
+    if (isPro) return dur >= 10 ? 158 : 79;
+    return dur >= 10 ? 98 : 49;
 }
 
 // POST /api/img2vid/jobs
@@ -38,9 +45,19 @@ router.post('/img2vid/jobs', requireAuth, express.json(), async (req, res) => {
     try {
         const reqId = Math.random().toString(36).slice(2, 8);
         const startedAt = Date.now();
-        const { gcsPath, endGcsPath = null, mode = 'standard', prompt = '', negativePrompt = '', duration = 5 } = req.body || {};
-        console.log(`[img2vid:${reqId}] incoming`, { uid: req.uid, gcsPath, endGcsPath: !!endGcsPath, mode, duration, promptLen: (prompt || '').length });
+        const { gcsPath, endGcsPath = null, mode = 'standard', resolution = '720p', prompt = '', negativePrompt = '', duration = 5 } = req.body || {};
+        console.log(`[img2vid:${reqId}] incoming`, { uid: req.uid, gcsPath, endGcsPath: !!endGcsPath, mode, resolution, duration, promptLen: (prompt || '').length });
         if (!gcsPath || typeof gcsPath !== 'string') throw httpError(422, 'gcsPath required');
+        // Mode validation (allow legacy 'hd' but normalize)
+        const modeLower = String(mode || '').toLowerCase();
+        const normalizedMode = modeLower === 'hd' ? 'pro' : modeLower;
+        if (normalizedMode !== 'standard' && normalizedMode !== 'pro') {
+            throw httpError(422, 'mode must be one of: standard, pro');
+        }
+        // Basic resolution validation (optional). Accept portrait suffixes.
+        const allowedRes = ['720p', '1080p', '720p_vertical', '1080p_vertical'];
+        const resValid = typeof resolution === 'string' && allowedRes.includes(String(resolution).toLowerCase());
+        if (!resValid) throw httpError(422, 'resolution invalid');
         const uid = req.uid;
         const parts = gcsPath.split('/');
         const allowedRoots = new Set(['users', 'user-uploads', 'user-outputs']);
@@ -79,7 +96,7 @@ router.post('/img2vid/jobs', requireAuth, express.json(), async (req, res) => {
         }
 
         // Resolve hold credits and check balance
-        const hold = await resolveHold({ mode, duration });
+        const hold = await resolveHold({ mode: normalizedMode, duration, resolution });
         console.log(`[img2vid:${reqId}] hold credits`, { hold });
         try {
             const bal = await credits.getUserCredits(uid);
@@ -89,7 +106,7 @@ router.post('/img2vid/jobs', requireAuth, express.json(), async (req, res) => {
 
         // Create job doc first
         const inputPaths = [gcsPath].concat(endGcsPath ? [endGcsPath] : []);
-        const { id: jobId } = await createVideoJob({ uid, gcsPath, modelKey: 'kling-video', input: { mode, prompt, negative_prompt: negativePrompt, duration }, holdCredits: hold });
+        const { id: jobId } = await createVideoJob({ uid, gcsPath, modelKey: 'kling-video', input: { mode: normalizedMode, resolution, prompt, negative_prompt: negativePrompt, duration }, holdCredits: hold });
         console.log(`[img2vid:${reqId}] job created`, { jobId });
         try { await db.collection('videoGenerations').doc(jobId).set({ inputPaths }, { merge: true }); } catch { }
 
@@ -110,7 +127,7 @@ router.post('/img2vid/jobs', requireAuth, express.json(), async (req, res) => {
         console.log(`[img2vid:${reqId}] webhook`, { webhookUrl });
 
         // Create prediction
-        const pred = await createKlingPrediction({ fileId: up.id, endFileId: upEnd ? upEnd.id : null, mode, prompt, negativePrompt, duration, webhookUrl });
+        const pred = await createKlingPrediction({ fileId: up.id, endFileId: upEnd ? upEnd.id : null, mode: normalizedMode, prompt, negativePrompt, duration, webhookUrl, resolution });
         console.log(`[img2vid:${reqId}] prediction created`, { predictionId: pred?.id });
         await markProcessing(jobId, { provider: 'replicate', providerPredictionId: pred.id, fileId: up.id, endFileId: upEnd ? upEnd.id : null });
 
@@ -119,8 +136,17 @@ router.post('/img2vid/jobs', requireAuth, express.json(), async (req, res) => {
             await db.collection('users').doc(uid).collection('images').doc(jobId).set({ uid, jobId, type: 'video', modelKey: 'kling-video', status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         } catch { }
 
-        console.log(`[img2vid:${reqId}] responded`, { jobId, ms: Date.now() - startedAt });
-        return res.json({ ok: true, jobId, providerPredictionId: pred.id });
+        // Read current pricing version (if present) so client can reconcile
+        let pricingVersion = 1;
+        try {
+            const pvDoc = await db.collection('config').doc('pricing').get();
+            if (pvDoc.exists) {
+                const pvData = pvDoc.data() || {};
+                if (typeof pvData.version === 'number') pricingVersion = pvData.version;
+            }
+        } catch { /* ignore */ }
+        console.log(`[img2vid:${reqId}] responded`, { jobId, ms: Date.now() - startedAt, hold, pricingVersion });
+        return res.json({ ok: true, jobId, providerPredictionId: pred.id, holdCredits: hold, pricingVersion });
     } catch (e) {
         console.warn('[img2vid:error]', e?.message);
         return toHttp(res, e);
